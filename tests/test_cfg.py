@@ -1,22 +1,22 @@
-# Copyright (c) 2026 k.zhukov
-# Licensed under the MIT License. See LICENSE in the project root for license information.
-import pytest
-from argus.targets.complex_license_vm import ComplexLicenseValidatorVM
-from argus.engine.cfg import CFGBuilder
+from pathlib import Path
 
-def test_cfg_construction_and_mermaid_export():
-    vm = ComplexLicenseValidatorVM(seed=42)
-    program = vm.generate_complex_validation_suite()
-    
-    cfg_builder = CFGBuilder()
-    graph = cfg_builder.build_from_bytecode(program)
-    
-    assert len(graph.nodes) == 4
-    assert graph.has_edge(10, 20)
-    assert graph.has_edge(20, 30)
-    assert graph.has_edge(30, 40)
-    
-    mermaid_doc = cfg_builder.export_mermaid()
-    assert "flowchart TD" in mermaid_doc
-    assert "State_10" in mermaid_doc
-    assert "State_40" in mermaid_doc
+from argus.binary import load_binary
+from argus.disasm import build_function_cfg
+
+SAMPLES = Path(__file__).resolve().parents[1] / "samples"
+
+
+def test_cfg_main_has_blocks():
+    img = load_binary(SAMPLES / "fauxware")
+    cfg = build_function_cfg(img, "main")
+    assert cfg.entry == img.symbols["main"].addr
+    assert len(cfg.blocks) >= 3
+    assert cfg.graph.number_of_edges() >= 2
+
+
+def test_cfg_authenticate():
+    img = load_binary(SAMPLES / "fauxware")
+    cfg = build_function_cfg(img, "authenticate")
+    assert len(cfg.blocks) >= 2
+    dot = cfg.to_dot()
+    assert "digraph" in dot

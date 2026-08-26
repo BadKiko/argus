@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "argus-re"
+version = "0.0.2"
+description = "Hybrid binary analysis: CFG, conservative GNN prune, SMT solve, patch"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "k.zhukov" }]
+dependencies = [
+  "capstone>=5.0",
+  "z3-solver>=4.12",
+  "pefile>=2024.8.26",
+  "pyelftools>=0.31",
+  "rich>=13",
+  "networkx>=3",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+ml = ["torch>=2.0"]
+
+[project.scripts]
+argus = "argus.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["argus*"]
+exclude = ["legacy*", "tests*", "samples*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

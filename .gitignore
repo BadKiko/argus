@@ -2,7 +2,12 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.venv/
+*.egg-info/
+dist/
+build/
 *.dmp
-builder.py
-setup_project.py
-init_builder.py
+.coverage
+htmlcov/
+argus/ml/models/*.pt
+third_party/
