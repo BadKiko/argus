@@ -1,7 +1,7 @@
 # Copyright (c) 2026 k.zhukov
 # Licensed under the MIT License. See LICENSE in the project root for license information.
 """
-Argus Command Line Interface & Demonstration Suite v0.0.5.
+Argus Command Line Interface & Demonstration Suite v0.0.6.
 Author: k.zhukov (2026) | MIT License
 """
 import sys
@@ -12,14 +12,15 @@ from rich.syntax import Syntax
 import z3
 
 from ..targets.mba_generator import MBAGenerator
-from ..engine.simplifier import MBASimplifier
+from ..targets.nonlinear_mba import NonlinearMBAGenerator
+from ..targets.hardcore_vm import HardcoreFeistelVM
 from ..targets.complex_license_vm import ComplexLicenseValidatorVM
+from ..engine.simplifier import MBASimplifier
 from ..engine.devirtualizer import AutomatedDevirtualizer
+from ..engine.concolic import ConcolicPathEngine
 from ..engine.codegen import CCodeGenerator
 from ..engine.cfg import CFGBuilder
-from ..frontend.x86_lifter import X86Lifter
 from ..frontend.pe_parser import PEParser
-from ..ai.junk_classifier import MLJunkClassifier
 
 console = Console(force_terminal=True, legacy_windows=False)
 
@@ -27,74 +28,52 @@ def print_banner():
     banner = """
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     [bold cyan]|[/bold cyan]     [bold white]ARGUS[/bold white] : Automated Reverse & Graph Slicer Engine     [bold cyan]|[/bold cyan]
-    [bold cyan]|[/bold cyan]     [dim white]Symbolic De-obfuscator & Decompiler v0.0.5[/dim white]        [bold cyan]|[/bold cyan]
+    [bold cyan]|[/bold cyan]     [dim white]Symbolic De-obfuscator & SMT Verifier v0.0.6[/dim white]     [bold cyan]|[/bold cyan]
     [bold cyan]|[/bold cyan]     [dim green]Author: k.zhukov | License: MIT (2026)[/dim green]                 [bold cyan]|[/bold cyan]
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     """
     console.print(banner)
 
-def demo_full_pipeline():
-    console.print(Panel("[bold yellow]Argus Automated De-virtualization & C Decompilation Pipeline[/bold yellow]"))
-    
-    vm = ComplexLicenseValidatorVM(seed=123)
-    program = vm.generate_complex_validation_suite()
-    
-    cfg_builder = CFGBuilder()
-    graph = cfg_builder.build_from_bytecode(program)
-    
-    devirt = AutomatedDevirtualizer(bit_size=32)
-    recovered_ast, stats = devirt.devirtualize_program(
-        bytecode=program,
-        input_vars=["HWID_IN", "LICENSE_KEY"],
-        target_var="AUTH_TOKEN"
-    )
-    
-    codegen = CCodeGenerator(function_name="validate_and_derive_token")
-    c_source = codegen.generate_c_function(recovered_ast, input_params=["HWID_IN", "LICENSE_KEY"])
-    
-    table = Table(title="De-obfuscation Pipeline Summary")
-    table.add_column("Pipeline Stage", style="cyan")
-    table.add_column("Result / Metric", style="bold green")
-    
-    table.add_row("1. Target Bytecode", f"{stats['total_instructions']} instructions (Flattened State Machine)")
-    table.add_row("2. Control Flow Graph", f"{len(graph.nodes)} Basic Blocks, {len(graph.edges)} Transitions")
-    table.add_row("3. Junk Code Pruning", f"{stats['pruned_junk_instructions']} dead operations eliminated")
-    table.add_row("4. Opaque Invariants", f"{stats['opaque_predicates_resolved']} number-theoretic predicates solved")
-    table.add_row("5. Formal SMT Proof", "PROVEN EQUIVALENT to Ground Truth (unsat)")
-    
-    console.print(table)
+def demo_nonlinear_frontier():
     console.print()
-    console.print(Panel("[bold green]Decompiled High-Level C Source Code[/bold green]"))
-    syntax = Syntax(c_source, "c", theme="monokai", line_numbers=True)
-    console.print(syntax)
+    console.print(Panel("[bold yellow]Frontier Demo 1: Nonlinear Polynomial MBA (High-Degree SMT Hardness)[/bold yellow]"))
+    
+    gen = NonlinearMBAGenerator(seed=42)
+    obf_prod, truth_prod = gen.generate_nonlinear_product_mba("x", "y")
+    obf_affine, truth_affine = gen.generate_affine_masked_mba("x", "y")
+    
+    table = Table(title="Nonlinear MBA SMT Solver Verification")
+    table.add_column("Complexity Class", style="cyan")
+    table.add_column("Expanded Nonlinear Formula", style="magenta")
+    table.add_column("Ground Truth", style="green")
+    table.add_column("SMT Proof", style="bold green")
 
-def demo_pe_parser():
-    console.print()
-    console.print(Panel("[bold yellow]PE/COFF Executable Binary Analysis Demo[/bold yellow]"))
-    
-    test_exe = r"C:\Windows\System32\cmd.exe"
-    parser = PEParser(test_exe)
-    info = parser.get_basic_info()
-    sections = parser.get_sections()
-    code_bytes = parser.extract_text_section_bytes()
-    
-    table = Table(title=f"PE Binary Metadata: {info['file_name']}")
-    table.add_column("Property", style="cyan")
-    table.add_column("Value", style="bold green")
-    
-    table.add_row("Architecture", info["architecture"])
-    table.add_row("Entry Point RVA", info["entry_point_rva"])
-    table.add_row("Image Base", info["image_base"])
-    table.add_row("Total Sections", str(info["number_of_sections"]))
-    table.add_row(".text Section Size", f"{len(code_bytes)} bytes" if code_bytes else "N/A")
-    
+    simplifier = MBASimplifier(bit_size=32)
+    for name, obf, truth in [("Degree-2 Product MBA", obf_prod, truth_prod), ("Affine Masked MBA", obf_affine, truth_affine)]:
+        z3_expr = simplifier.parse_python_mba_to_z3(obf, ("x", "y"))
+        _, is_valid = simplifier.simplify_and_verify(z3_expr)
+        table.add_row(name, obf, truth, "[bold green]VERIFIED (unsat)[/bold green]" if is_valid else "[bold red]FAIL[/bold red]")
+
     console.print(table)
-    parser.close()
+
+def demo_hardcore_feistel():
+    console.print()
+    console.print(Panel("[bold yellow]Frontier Demo 2: 16-Round Nonlinear Feistel Network Target[/bold yellow]"))
+    
+    vm = HardcoreFeistelVM(rounds=16, seed=42)
+    l_out, r_out, trace = vm.execute_concrete(0xDEADBEEF, 0xCAFEBABE)
+    
+    console.print(f"[bold cyan]Input State:[/bold cyan]  L=0xDEADBEEF, R=0xCAFEBABE")
+    console.print(f"[bold green]Output State (16 Rounds):[/bold green] L=0x{l_out:08X}, R=0x{r_out:08X}")
+    console.print("[dim]First 4 Rounds of Cryptographic Feistel Trace:[/dim]")
+    for line in trace[:4]:
+        console.print(f"  [magenta]{line}[/magenta]")
+    console.print("  [dim]... [12 additional nonlinear rounds executed] ...[/dim]")
 
 def main():
     print_banner()
-    demo_full_pipeline()
-    demo_pe_parser()
+    demo_nonlinear_frontier()
+    demo_hardcore_feistel()
 
 if __name__ == "__main__":
     main()
