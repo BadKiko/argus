@@ -312,7 +312,22 @@ def find_in_binary(
         "use patch_candidates with argus_patch force_branch/nop_bytes; "
         "never stub main/entry"
     )
-    if uniq_p:
+    lex_apis = [
+        n
+        for n in (
+            "IsLicenseGenuine",
+            "IsLicenseValid",
+            "IsTrialGenuine",
+            "IsLocalTrialGenuine",
+        )
+        if n in img.symbols
+    ]
+    if lex_apis:
+        next_hint = (
+            f"LexActivator APIs found {lex_apis}: use argus_patch kind=unlock_license "
+            f"(returns LA_OK=0) to unlock PRO — string replaces alone do not unlock features"
+        )
+    elif uniq_p:
         next_hint = (
             f"try argus_patch kind={uniq_p[0]['kind']} addr={uniq_p[0]['addr']} "
             f"— then safety-check; on unsafe try next candidate"
@@ -320,15 +335,22 @@ def find_in_binary(
 
     return {
         "ok": True,
-        "summary": f"find hits={len(hits)} patch_candidates={len(uniq_p)}",
+        "summary": (
+            f"find hits={len(hits)} patch_candidates={len(uniq_p)}"
+            + (f" lex_apis={len(lex_apis)}" if lex_apis else "")
+        ),
         "evidence": {
             "hits": hits,
             "patch_candidates": uniq_p,
+            "license_apis": [
+                {"name": n, "addr": hex(img.symbols[n].addr)} for n in lex_apis
+            ],
             "entry": hex(img.entry),
             "fmt": img.fmt,
         },
         "hits": hits,
         "patch_candidates": uniq_p,
+        "license_apis": lex_apis,
         "limits": {"limit": limit, "returned": len(hits)},
         "next_hint": next_hint,
     }

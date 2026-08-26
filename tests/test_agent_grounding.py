@@ -141,6 +141,14 @@ def test_tools_include_xrefs():
     assert "argus_find" in names
 
 
+def test_unlock_license_in_patch_kinds():
+    patch = next(t for t in ARGUS_TOOLS if t["function"]["name"] == "argus_patch")
+    kinds = patch["function"]["parameters"]["properties"]["kind"]["enum"]
+    assert "unlock_license" in kinds
+    assert "replace_string" in kinds
+    assert PatchKind.UNLOCK_LICENSE.value == "unlock_license"
+
+
 def test_safety_detects_early_ret_stub(tmp_path):
     import shutil
 

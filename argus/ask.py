@@ -30,6 +30,8 @@ class PatchKind(str, Enum):
     SKIP_CHECK = "skip_check"  # NOP strcmp / force success path
     NOP_BYTES = "nop_bytes"  # NOP length at VA
     RET_IMM = "ret_imm"  # mov eax,imm; ret at VA / function
+    REPLACE_STRING = "replace_string"  # in-place UI/data string swap
+    UNLOCK_LICENSE = "unlock_license"  # LexActivator/IsLicense* → return LA_OK (0)
 
 
 TOOL_SCHEMA: Dict[str, Any] = {
@@ -61,6 +63,8 @@ class Hint:
     patch_addr: Optional[int] = None
     patch_size: Optional[int] = None
     ret_value: int = 1
+    old_string: Optional[str] = None
+    new_string: Optional[str] = None
     stdin_seed: Optional[bytes] = None  # from hint NLP
 
     def to_dict(self) -> dict:
@@ -77,6 +81,8 @@ class Hint:
             "patch_addr": hex(self.patch_addr) if self.patch_addr is not None else None,
             "patch_size": self.patch_size,
             "ret_value": self.ret_value,
+            "old_string": self.old_string,
+            "new_string": self.new_string,
             "stdin_seed": None if self.stdin_seed is None else self.stdin_seed.decode("latin1", errors="replace"),
         }
 
@@ -107,10 +113,66 @@ class AskResult:
 
 
 _AUTH_NAMES = ("authenticate", "check_password", "verify", "target_function", "main")
-_SAFE_STUB_NAMES = frozenset({"authenticate", "check_password", "verify", "target_function"})
+# LexActivator / Cryptlex status: LA_OK == 0 (success). Stubbing these unlocks PRO.
+_LEX_OK_FUNCS = (
+    "IsLicenseGenuine",
+    "IsLicenseValid",
+    "IsTrialGenuine",
+    "IsLocalTrialGenuine",
+)
+_SAFE_STUB_NAMES = frozenset(
+    {
+        "authenticate",
+        "check_password",
+        "verify",
+        "target_function",
+        *_LEX_OK_FUNCS,
+    }
+)
 _ENTRY_LABELS = frozenset({"main", "entry", "_start", "start", "WinMain", "wWinMain"})
 _MAX_LIFT_BLOCKS = 64
 _MAX_CALLEES = 48
+
+
+def _lex_license_apis(img) -> List[str]:
+    return [n for n in _LEX_OK_FUNCS if n in img.symbols]
+
+
+def _unlock_lexactivator(path: str, output: str) -> tuple[bool, dict, List[str]]:
+    """Force LexActivator Is* checks to return LA_OK (0) so PRO features unlock."""
+    from argus.binary import load_binary
+    from argus.patch import Patcher
+    from argus.prove.certificate import PatchCertificate
+
+    img = load_binary(path)
+    targets = _lex_license_apis(img)
+    if not targets:
+        return False, {"notes": ["no LexActivator IsLicense*/IsTrial* symbols"]}, ["no lex APIs"]
+
+    patcher = Patcher.from_path(path)
+    payload = _encode_mov_eax_imm(0) + _encode_ret()  # LA_OK
+    notes: List[str] = []
+    for name in targets:
+        addr = img.symbols[name].addr
+        if not patcher.patch_bytes(addr, payload, note=f"{name}:=LA_OK(0);ret"):
+            notes.append(f"fail {name}")
+            continue
+        patcher.nop(addr + len(payload), 8, note=f"pad {name}")
+        notes.append(f"unlock {name}@{hex(addr)} → return 0")
+
+    if not any(n.startswith("unlock ") for n in notes):
+        return False, {"notes": notes}, notes
+
+    patcher.save(output)
+    cert = PatchCertificate(
+        patches=[{"addr": hex(p.addr), "note": p.note} for p in patcher.patches],
+        proven=False,
+        notes=["LexActivator unlock: Is* → LA_OK(0)"] + notes,
+    )
+    ok2, cert2, notes2, _ = _seal_patch(
+        path, output, True, cert.to_dict(), notes, answer_ok=f"unlock_license {targets}"
+    )
+    return ok2, cert2, notes2
 
 
 def _pick_function(img, hinted: Optional[str]) -> str:
@@ -529,6 +591,9 @@ def _skip_check_patch(path: str, fn: str, output: str, note: str) -> tuple[bool,
             used.append(cand)
 
     if n == 0:
+        # Commercial apps with LexActivator: unlock IsLicense* (return 0), not UI branches
+        if _lex_license_apis(img):
+            return _unlock_lexactivator(path, output)
         for name in ("authenticate", "check_password", "verify", "target_function"):
             if name in img.symbols:
                 return _patch_always_const(path, name, 1, output)
@@ -805,6 +870,24 @@ def ask(path: str, hint: Hint) -> AskResult:
                 evidence={"safety": (cert or {}).get("safety")},
                 notes=notes + n,
             )
+        if kind == PatchKind.UNLOCK_LICENSE:
+            ok, cert, n = _unlock_lexactivator(path, out)
+            if not ok and any("no LexActivator" in x or "no lex" in x.lower() for x in n):
+                ok, cert, n = _skip_check_patch(path, fn, out, hint.note)
+            ans = (n and n[0]) if not ok else ("unlock_license" if "unlock" in str(n).lower() or ok else "skip_check")
+            if ok:
+                ans = "unlock_license" if _lex_license_apis(img) or "unlock" in " ".join(n).lower() else "skip_check"
+            else:
+                ans = n[0] if n else "unlock refused"
+            return AskResult(
+                ok=ok,
+                want=hint.want.value,
+                answer=ans,
+                patched_path=out if ok else None,
+                certificate=cert,
+                evidence={"safety": (cert or {}).get("safety"), "apis": _lex_license_apis(img)},
+                notes=notes + n,
+            )
         if kind == PatchKind.FORCE_BRANCH:
             from argus.patch.intents import force_branch
 
@@ -890,6 +973,47 @@ def ask(path: str, hint: Hint) -> AskResult:
                     notes=notes + n2,
                 )
             return AskResult(ok=False, want=hint.want.value, certificate=cert, notes=notes)
+        if kind == PatchKind.REPLACE_STRING:
+            from argus.patch.intents import replace_string
+
+            old_s = hint.old_string or ""
+            new_s = hint.new_string if hint.new_string is not None else ""
+            if not old_s:
+                return AskResult(
+                    ok=False,
+                    want=hint.want.value,
+                    answer="old_string required for replace_string",
+                    notes=notes + ["old_string required"],
+                )
+            ok, cert = replace_string(path, old_s, new_s, out)
+            if ok:
+                # verify new bytes present
+                from argus.binary import load_binary as _lb
+
+                ev = {"replaced": True, "old": old_s[:80], "new": new_s[:80]}
+                try:
+                    ev["found_new"] = bool(_lb(out).find_string(new_s.encode("utf-8", errors="replace")))
+                except Exception:
+                    ev["found_new"] = None
+                ok, cert, n2, ans = _seal_patch(
+                    path, out, True, cert, [], answer_ok=f"replaced string → {new_s[:60]!r}"
+                )
+                return AskResult(
+                    ok=ok,
+                    want=hint.want.value,
+                    answer=ans if ok else (n2[0] if n2 else "unsafe"),
+                    patched_path=out if ok else None,
+                    certificate=cert,
+                    evidence={"safety": (cert or {}).get("safety"), **ev},
+                    notes=notes + n2,
+                )
+            return AskResult(
+                ok=False,
+                want=hint.want.value,
+                answer=(cert or {}).get("notes", ["replace failed"])[0] if isinstance(cert, dict) else "replace failed",
+                certificate=cert if isinstance(cert, dict) else {},
+                notes=notes + list((cert or {}).get("notes") or []),
+            )
         return AskResult(ok=False, want=hint.want.value, notes=notes + [f"unknown patch_kind {kind}"])
 
     if hint.want == Want.REPORT:

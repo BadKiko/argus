@@ -96,9 +96,12 @@ ARGUS_TOOLS: List[dict] = [
     openai_tool(
         "argus_patch",
         "Write a patched binary WITHOUT breaking app startup. "
-        "Kinds: always_true/always_false only on auth helpers (authenticate/…), never main/entry. "
-        "Prefer skip_check, force_branch, nop_bytes, ret_imm on a concrete check VA. "
-        "Default output is <binary>.patched. If refused, do not invent success.",
+        "For PRO/license unlock on LexActivator apps: kind=unlock_license FIRST "
+        "(stubs IsLicenseGenuine/IsLicenseValid/IsTrial* to return 0=LA_OK). "
+        "replace_string only changes UI text — it does NOT unlock features. "
+        "Also: force_branch, nop_bytes, skip_check, replace_string, ret_imm. "
+        "Chain: binary=./file.patched for follow-up patches. "
+        "Do NOT claim unlock success after only string replaces.",
         {
             "binary": {"type": "string"},
             "kind": {
@@ -112,13 +115,17 @@ ARGUS_TOOLS: List[dict] = [
                     "force_branch",
                     "nop_bytes",
                     "ret_imm",
+                    "replace_string",
+                    "unlock_license",
                 ],
             },
             "function": {"type": "string", "description": "Symbol name or 0x VA (not main for stubs)"},
             "addr": {"type": "string", "description": "VA for force_branch / nop_bytes / ret_imm"},
             "size": {"type": "integer", "description": "Byte length for nop_bytes (default 5)"},
             "taken": {"type": "boolean", "description": "force_branch: take branch if true"},
-            "value": {"type": "integer", "description": "ret_imm return value (default 1)"},
+            "value": {"type": "integer", "description": "ret_imm return value (default 1; LexActivator LA_OK=0)"},
+            "old": {"type": "string", "description": "replace_string: existing substring to find"},
+            "new": {"type": "string", "description": "replace_string: replacement (must fit in old slot)"},
             "output": {"type": "string"},
         },
         ["binary", "kind"],
@@ -431,6 +438,8 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                     patch_size=arguments.get("size"),
                     force_taken=bool(arguments.get("taken", True)),
                     ret_value=int(arguments.get("value", 1)),
+                    old_string=arguments.get("old") or arguments.get("old_string"),
+                    new_string=arguments.get("new") if "new" in arguments else arguments.get("new_string"),
                 ),
             )
             env = _ask_to_envelope(r)

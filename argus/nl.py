@@ -26,11 +26,21 @@ _RULES: list[Tuple[re.Pattern, Want, Optional[PatchKind]]] = [
             r"(убер(и|ать)\s*(проверк|лиценз)|отключ(и|ить)\s*(проверк|лиценз)|"
             r"обойд\w*\s*(лиценз|license|проверк)|bypass\s*(licen|check)|"
             r"disable\s*(licen|check)|патч\w*\s*(лиценз|проверк|license)|"
-            r"убери\s*лиценз|nop\s*call|force\s*branch|ret_imm|nop_bytes)",
+            r"убери\s*лиценз|nop\s*call|force\s*branch|ret_imm|nop_bytes|"
+            r"unlock_license|любой\s*ключ|сразу\s*актив)",
             re.I,
         ),
         Want.PATCH,
         PatchKind.SKIP_CHECK,
+    ),
+    # Explicit UI string swap
+    (
+        re.compile(
+            r"(вместо\s*текст|replace\s*string|замен(и|ить)\s*строк|писало\s+[«\"'])",
+            re.I,
+        ),
+        Want.PATCH,
+        PatchKind.REPLACE_STRING,
     ),
     (re.compile(r"(всегда\s*false|always\s*false|force\s*fail)", re.I), Want.PATCH, PatchKind.ALWAYS_FALSE),
     (re.compile(r"(skip\s*check|убери\s*проверк|nop\s*strcmp|отключ(и|ить)\s*проверк)", re.I), Want.PATCH, PatchKind.SKIP_CHECK),
@@ -82,6 +92,34 @@ def parse_prompt(prompt: str, output: Optional[str] = None) -> Hint:
             patch_kind = PatchKind.RET_IMM
         elif re.search(r"always\s*true|всегда\s*true", text, re.I):
             patch_kind = PatchKind.ALWAYS_TRUE
+        elif re.search(r"unlock_license|любой\s*ключ|сразу\s*актив|IsLicenseGenuine", text, re.I):
+            patch_kind = PatchKind.UNLOCK_LICENSE
+        elif re.search(r"вместо\s*текст|replace_string|замен(и|ить)\s*строк", text, re.I):
+            patch_kind = PatchKind.REPLACE_STRING
+
+    old_string = None
+    new_string = None
+    # «вместо текста X писало Y» / instead of "X" write "Y"
+    m = re.search(
+        r"вместо\s*(?:текста\s*)?[«\"'](.+?)[»\"']\s*(?:писало|писать|→|->|=)\s*[«\"'](.+?)[»\"']",
+        text,
+        re.I | re.S,
+    )
+    if not m:
+        m = re.search(
+            r"(?:replace|change)\s+[«\"'](.+?)[»\"']\s+(?:with|to)\s+[«\"'](.+?)[»\"']",
+            text,
+            re.I | re.S,
+        )
+    if m:
+        old_string, new_string = m.group(1), m.group(2)
+        want = Want.PATCH
+        if patch_kind is None or patch_kind == PatchKind.SKIP_CHECK:
+            # keep skip_check if also license — agent handles multi; for ai prefer replace when only strings
+            if not re.search(r"лиценз|license|проверк", text, re.I):
+                patch_kind = PatchKind.REPLACE_STRING
+            else:
+                patch_kind = patch_kind or PatchKind.REPLACE_STRING
 
     fn = None
     for rx in _FN_PATTERNS:
@@ -112,6 +150,8 @@ def parse_prompt(prompt: str, output: Optional[str] = None) -> Hint:
         patch_addr=patch_addr,
         branch_addr=patch_addr if patch_kind == PatchKind.FORCE_BRANCH else None,
         patch_size=patch_size,
+        old_string=old_string,
+        new_string=new_string,
     )
 
 
