@@ -1,7 +1,7 @@
 # Copyright (c) 2026 k.zhukov
 # Licensed under the MIT License. See LICENSE in the project root for license information.
 """
-Argus Command Line Interface & Demonstration Suite v0.0.8.
+Argus Command Line Interface & Demonstration Suite v0.0.9.
 Author: k.zhukov (2026) | MIT License
 """
 import sys
@@ -19,6 +19,10 @@ from ..engine.simplifier import MBASimplifier
 from ..engine.cegis import CEGISSynthesizer
 from ..engine.path_explorer import SymbolicPathExplorer
 from ..scanner.function_scanner import FunctionScanner
+from ..scanner.xref_engine import XRefEngine
+from ..engine.patcher import BinaryPatcher
+from ..engine.differ import BinaryDiffer
+from ..frontend.assembler import X86Assembler
 from ..engine.codegen import CCodeGenerator
 from ..engine.cfg import CFGBuilder
 from ..frontend.pe_parser import PEParser
@@ -30,41 +34,40 @@ def print_banner():
     banner = """
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     [bold cyan]|[/bold cyan]     [bold white]ARGUS[/bold white] : Automated Reverse & Graph Slicer Engine     [bold cyan]|[/bold cyan]
-    [bold cyan]|[/bold cyan]     [dim white]Goal-Driven Path Explorer & Sink Solver v0.0.8[/dim white]    [bold cyan]|[/bold cyan]
+    [bold cyan]|[/bold cyan]     [dim white]Reverse-Engineering & Binary Rewriter Suite v0.0.9[/dim white] [bold cyan]|[/bold cyan]
     [bold cyan]|[/bold cyan]     [dim green]Author: k.zhukov | License: MIT (2026)[/dim green]                 [bold cyan]|[/bold cyan]
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     """
     console.print(banner)
 
-def demo_path_explorer_sink_solver():
-    console.print(Panel("[bold yellow]Goal-Driven Symbolic Path Explorer: Automated Password / Key Recovery[/bold yellow]"))
+def demo_patcher_and_differ():
+    console.print(Panel("[bold yellow]Binary Patcher & Code Differ Demonstration[/bold yellow]"))
     
-    explorer = SymbolicPathExplorer(bit_size=32)
-    passwd = explorer.create_symbolic_byte_buffer("key", 8)
+    assembler = X86Assembler(bit_size=64)
+    orig_code = b"\x83\xF8\x00\x74\x05\x31\xC0\xC3\xB8\x01\x00\x00\x00\xC3" # CMP EAX, 0; JZ +5; XOR EAX, EAX; RET; MOV EAX, 1; RET
     
-    # Target obfuscated key check: "ARGUSKEY"
-    expected = b"ARGUSKEY"
-    console.print(f"[bold cyan]Input Parameter:[/bold cyan] 8-Byte Symbolic Buffer [key_0 .. key_7]")
-    console.print(f"[bold magenta]Target Condition:[/bold magenta] Multilevel Obfuscated Key Verification Endpoint")
-
-    # Add branch conditions
-    for i, exp_byte in enumerate(expected):
-        mask = (i * 17 + 0x33) & 0xFF
-        obf_val = exp_byte ^ mask
-        explorer.add_path_constraint((passwd[i] ^ z3.BitVecVal(mask, 8)) == z3.BitVecVal(obf_val, 8))
-
-    is_sat, assignments, recovered_bytes = explorer.solve_for_target_sink()
+    # Patch: replace JZ (0x74) with JNZ (0x75) and NOP out the XOR EAX, EAX
+    patched_code = bytearray(orig_code)
+    patched_code[3] = 0x75 # Invert JZ -> JNZ
+    patched_code[5:7] = assembler.nop(2) # NOP XOR EAX, EAX
     
-    table = Table(title="Symbolic Path Exploration & SMT Solver Result")
-    table.add_column("Property", style="cyan")
-    table.add_column("Value / State", style="bold green")
-    table.add_row("SMT Satisfiability", "[bold green]SATISFIABLE (SAT)[/bold green]" if is_sat else "[bold red]UNSAT[/bold red]")
-    table.add_row("Branch Equations", f"{len(expected)} Constraints Verified")
-    table.add_row("Recovered Key Bytes", f"{recovered_bytes.decode('ascii', errors='ignore') if recovered_bytes else 'N/A'}")
+    differ = BinaryDiffer(bit_size=64)
+    diffs = differ.diff_buffers(orig_code, bytes(patched_code), base_address=0x140001000)
     
+    table = Table(title="Binary Modification & Assembly Diff")
+    table.add_column("Address", style="cyan")
+    table.add_column("Original Code", style="bold red")
+    table.add_column("Patched Code", style="bold green")
+    
+    for d in diffs:
+        table.add_row(
+            d["address"],
+            f"{d['orig_hex']} ({', '.join(d['orig_disasm'])})",
+            f"{d['patched_hex']} ({', '.join(d['patched_disasm'])})"
+        )
     console.print(table)
     console.print()
-    console.print("[bold green][SUCCESS] Automated Goal-Driven Path Solving Completed![/bold green]")
+    console.print("[bold green][SUCCESS] Binary Patch & Diff Engine Operational![/bold green]")
     console.print()
 
 def analyze_pe_file(pe_path: str):
@@ -85,15 +88,14 @@ def analyze_pe_file(pe_path: str):
     table.add_row(".text Section Size", f"{len(code_bytes):,} bytes" if code_bytes else "N/A")
     console.print(table)
 
-    if code_bytes:
-        scanner = FunctionScanner(bit_size=64)
-        funcs = scanner.scan_functions_in_bytes(code_bytes[:1024], base_address=0x1000)
-        console.print()
-        console.print(Panel(f"[bold yellow]Discovered Functions & Endpoints ({len(funcs)} detected in initial block)[/bold yellow]"))
-        for f in funcs[:5]:
-            status = "[bold green]Candidate Validator[/bold green]" if f["is_potential_validator"] else "[dim]Normal Routine[/dim]"
-            console.print(f"  Start: [cyan]{f['start_address']}[/cyan] | Ins: [magenta]{f['instruction_count']}[/magenta] | Status: {status}")
+    xref_engine = XRefEngine(pe_path, bit_size=64)
+    strings = xref_engine.find_strings(min_length=6)
+    console.print()
+    console.print(Panel(f"[bold yellow]Discovered Cross-Reference String Anchors ({len(strings)} strings found)[/bold yellow]"))
+    for s in strings[:6]:
+        console.print(f"  RVA: [cyan]{s['rva']}[/cyan] ({s['section']}) -> [magenta]{s['string']}[/magenta]")
 
+    xref_engine.close()
     parser.close()
     console.print()
     console.print("[bold green][OK] Binary Analysis Completed Successfully![/bold green]")
@@ -103,7 +105,7 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--file":
         analyze_pe_file(sys.argv[2])
     else:
-        demo_path_explorer_sink_solver()
+        demo_patcher_and_differ()
 
 if __name__ == "__main__":
     main()
