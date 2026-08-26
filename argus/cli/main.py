@@ -69,9 +69,40 @@ def demo_full_pipeline():
     syntax = Syntax(c_source, "c", theme="monokai", line_numbers=True)
     console.print(syntax)
 
+def demo_x86_lifter():
+    from ..frontend.x86_lifter import X86Lifter
+    console.print()
+    console.print(Panel("[bold yellow]x86_64 Binary Machine Code Lifter (Capstone -> Z3 AST)[/bold yellow]"))
+    
+    # Real x86_64 shellcode: mov rax, rdi; add rax, rsi; xor rax, 0x42
+    shellcode = b"\x48\x89\xf8\x48\x01\xf0\x48\x83\xf0\x42"
+    lifter = X86Lifter(bit_size=64)
+    env, disasm = lifter.lift_code_bytes(shellcode, initial_regs=["rdi", "rsi"])
+    
+    console.print("[bold cyan]Disassembled Native Instructions:[/bold cyan]")
+    for line in disasm:
+        console.print(f"  [magenta]{line}[/magenta]")
+    console.print(f"\n[bold green]Recovered Symbolic RAX Formula:[/bold green] {env.get('rax')}")
+
+def demo_ai_dataset():
+    from ..ai.dataset_gen import AIDatasetGenerator
+    console.print()
+    console.print(Panel("[bold yellow]AI/LLM Neural De-obfuscation Dataset Synthesizer[/bold yellow]"))
+    
+    gen = AIDatasetGenerator(seed=42)
+    sample = gen.generate_sample(1)
+    
+    console.print(f"[bold cyan]Synthesized Sample ID:[/bold cyan] {sample['id']} ({sample['type']})")
+    console.print(f"[bold magenta]Obfuscated Input:[/bold magenta] {sample['obfuscated_expression']}")
+    console.print(f"[bold green]Ground Truth Target:[/bold green] {sample['ground_truth']}")
+    console.print(f"[bold yellow]SMT Verified Equivalent:[/bold yellow] {sample['smt_verified']}")
+
 def main():
     print_banner()
     demo_full_pipeline()
+    demo_x86_lifter()
+    demo_ai_dataset()
 
 if __name__ == "__main__":
     main()
+
