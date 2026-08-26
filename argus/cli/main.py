@@ -1,7 +1,7 @@
 # Copyright (c) 2026 k.zhukov
 # Licensed under the MIT License. See LICENSE in the project root for license information.
 """
-Argus Command Line Interface & Demonstration Suite v0.2.0.
+Argus Command Line Interface & Demonstration Suite v0.3.1.
 Author: k.zhukov (2026) | MIT License
 """
 import sys
@@ -44,14 +44,14 @@ def print_banner():
     banner = """
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     [bold cyan]|[/bold cyan]     [bold white]ARGUS[/bold white] : Automated Reverse & Graph Slicer Engine     [bold cyan]|[/bold cyan]
-    [bold cyan]|[/bold cyan]     [dim white]Advanced Protection Analysis & De-virtualizer v0.2.0[/dim white] [bold cyan]|[/bold cyan]
+    [bold cyan]|[/bold cyan]     [dim white]Advanced Protection Analysis & De-virtualizer v0.3.1[/dim white] [bold cyan]|[/bold cyan]
     [bold cyan]|[/bold cyan]     [dim green]Author: k.zhukov | License: MIT (2026)[/dim green]                 [bold cyan]|[/bold cyan]
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     """
     console.print(banner)
 
 def demo_v020_protection_breakers():
-    console.print(Panel("[bold yellow]Argus v0.2.0: Advanced Protection-Breaking Engines[/bold yellow]"))
+    console.print(Panel("[bold yellow]Argus v0.3.1: Advanced Protection-Breaking Engines[/bold yellow]"))
     
     # 1. Devirtualizer V2
     poly_target = PolymorphicVMTarget(seed=42)
