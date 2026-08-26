@@ -345,6 +345,10 @@ def cmd_ai(args: argparse.Namespace) -> int:
 
     from argus.nl import ai, parse_prompt
 
+    if not Path(args.binary).is_file():
+        console.print(f"нет файла: {args.binary}")
+        return 1
+
     hint = parse_prompt(args.prompt, output=args.output)
     console.print(f"intent want={hint.want.value} patch={hint.patch_kind} fn={hint.function!r}")
     res = ai(args.binary, args.prompt, output=args.output)
@@ -369,6 +373,45 @@ def cmd_ai(args: argparse.Namespace) -> int:
         console.print(json.dumps(res.to_dict(), indent=2))
     if res.patched_path and res.answer:
         console.print(f"patched {res.patched_path}")
+    return 0 if res.ok else 1
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    """LLM agent (OpenAI-compat or native Gemini AI Studio) with Argus tools."""
+    import json
+
+    from argus.llm.agent import binary_missing, missing_binary_message, resolve_provider, run_agent
+
+    if args.binary and binary_missing(args.binary):
+        console.print(missing_binary_message(args.binary))
+        return 1
+
+    provider = resolve_provider(args.provider)
+    model = args.model
+    if provider == "gemini" and not model:
+        model = "gemini-3.6-flash"
+    console.print(f"provider={provider} model={model or '(default)'}")
+    try:
+        res = run_agent(
+            args.prompt,
+            binary=args.binary,
+            provider=provider,
+            url=args.url,
+            key=args.key,
+            model=model,
+            max_steps=args.max_steps,
+            verbose=args.verbose,
+        )
+    except Exception as e:
+        console.print(f"agent error: {e}")
+        return 1
+    console.print(f"[{res.provider}] {res.answer}")
+    if args.json:
+        Path(args.json).write_text(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
+        console.print(f"wrote {args.json}")
+    if args.verbose:
+        for t in res.tool_trace:
+            console.print(f"  tool {t['tool']} -> {t['result_preview'][:160]!r}")
     return 0 if res.ok else 1
 
 
@@ -577,13 +620,38 @@ def build_parser() -> argparse.ArgumentParser:
     ask_p.add_argument("--json", help="Write AskResult JSON")
     ask_p.set_defaults(func=cmd_ask)
 
-    ai_p = sp.add_parser("ai", help='Natural language: argus ai "дай пароль" app.exe')
+    ai_p = sp.add_parser("ai", help='Natural language router (no LLM): argus ai "дай пароль" app.exe')
     ai_p.add_argument("prompt", help="Request in Russian or English")
     ai_p.add_argument("binary", help="Path to ELF/PE (Windows paths ok)")
     ai_p.add_argument("-o", "--output", help="Output path for patch/deobf")
     ai_p.add_argument("--json", help="Also write full AskResult JSON")
     ai_p.add_argument("-v", "--verbose", action="store_true", help="Dump full result")
     ai_p.set_defaults(func=cmd_ai)
+
+    ag = sp.add_parser(
+        "agent",
+        help="LLM agent with Argus tools (OpenAI-compat or native Gemini AI Studio)",
+    )
+    ag.add_argument("prompt", help="What you want from the binary")
+    ag.add_argument("binary", nargs="?", help="Path to binary (optional if path is in prompt)")
+    ag.add_argument(
+        "--provider",
+        choices=["auto", "gemini", "openai"],
+        default="auto",
+        help="gemini = AI Studio generateContent; openai = OpenAI-compatible URL",
+    )
+    ag.add_argument("--url", help="API base URL (openai compat, or gemini v1beta root)")
+    ag.add_argument("--key", help="API key (GEMINI_API_KEY / OPENAI_API_KEY)")
+    ag.add_argument("--model", help="Model id (e.g. gemini-2.0-flash or gpt-4o-mini)")
+    ag.add_argument(
+        "--max-steps",
+        type=int,
+        default=32,
+        help="Max LLM tool rounds (default 32; raise for deep RE, not unlimited)",
+    )
+    ag.add_argument("--json", help="Write AgentResult JSON")
+    ag.add_argument("-v", "--verbose", action="store_true")
+    ag.set_defaults(func=cmd_agent)
 
     ev = sp.add_parser("eval", help="Timing metrics (ms/function) or --corpus scan")
     ev.add_argument("binary", nargs="?", default=None)

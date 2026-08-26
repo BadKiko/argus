@@ -28,6 +28,8 @@ class PatchKind(str, Enum):
     NOP_PROMPTS = "nop_prompts"
     FORCE_BRANCH = "force_branch"
     SKIP_CHECK = "skip_check"  # NOP strcmp / force success path
+    NOP_BYTES = "nop_bytes"  # NOP length at VA
+    RET_IMM = "ret_imm"  # mov eax,imm; ret at VA / function
 
 
 TOOL_SCHEMA: Dict[str, Any] = {
@@ -56,6 +58,9 @@ class Hint:
     note: str = ""
     force_taken: bool = True
     branch_addr: Optional[int] = None
+    patch_addr: Optional[int] = None
+    patch_size: Optional[int] = None
+    ret_value: int = 1
     stdin_seed: Optional[bytes] = None  # from hint NLP
 
     def to_dict(self) -> dict:
@@ -69,6 +74,9 @@ class Hint:
             "note": self.note,
             "force_taken": self.force_taken,
             "branch_addr": hex(self.branch_addr) if self.branch_addr is not None else None,
+            "patch_addr": hex(self.patch_addr) if self.patch_addr is not None else None,
+            "patch_size": self.patch_size,
+            "ret_value": self.ret_value,
             "stdin_seed": None if self.stdin_seed is None else self.stdin_seed.decode("latin1", errors="replace"),
         }
 
@@ -98,36 +106,153 @@ class AskResult:
         }
 
 
+_AUTH_NAMES = ("authenticate", "check_password", "verify", "target_function", "main")
+_SAFE_STUB_NAMES = frozenset({"authenticate", "check_password", "verify", "target_function"})
+_ENTRY_LABELS = frozenset({"main", "entry", "_start", "start", "WinMain", "wWinMain"})
+_MAX_LIFT_BLOCKS = 64
+_MAX_CALLEES = 48
+
+
 def _pick_function(img, hinted: Optional[str]) -> str:
-    if hinted and hinted in img.symbols:
-        return hinted
-    for name in ("authenticate", "check_password", "verify", "target_function", "main"):
+    """Prefer explicit hint / auth names / main / entry — never largest-by-size."""
+    if hinted:
+        if hinted in img.symbols:
+            return hinted
+        # allow 0xaddr as synthetic name when symbols missing
+        try:
+            int(hinted, 0)
+            return hinted
+        except ValueError:
+            pass
+    # Prefer check helpers over main — stubbing main kills real apps
+    for name in ("authenticate", "check_password", "verify", "target_function"):
         if name in img.symbols:
             return name
-    funcs = [s for s in img.symbols.values() if s.is_function and not s.is_import and s.addr]
-    if funcs:
-        return max(funcs, key=lambda s: s.size or 0).name
+    if "main" in img.symbols:
+        return "main"
+    for s in img.symbols.values():
+        if s.is_function and not s.is_import and s.addr == img.entry and s.name:
+            return s.name
     return "main"
 
 
-def _pseudo_c_lift(path: str, fn: str) -> tuple[str, dict]:
-    """Pseudo-C style lift after CFF adjacency cleanup."""
+def _resolve_addr(img, fn: Optional[str], entry: Optional[int] = None) -> tuple[Optional[int], str]:
+    """Resolve function name or hex VA to address."""
+    if entry is not None:
+        return entry, fn or hex(entry)
+    if fn and fn in img.symbols:
+        return img.symbols[fn].addr, fn
+    if fn:
+        try:
+            return int(fn, 0), fn
+        except ValueError:
+            pass
+    if "main" in img.symbols:
+        return img.symbols["main"].addr, "main"
+    return img.entry, "entry"
+
+
+def _is_program_entry(img, addr: Optional[int], label: str) -> bool:
+    """True if patch target is process entry / main — early ret kills the app."""
+    if label in _ENTRY_LABELS:
+        return True
+    if addr is None:
+        return False
+    if addr == img.entry:
+        return True
+    main = img.symbols.get("main")
+    if main and addr == main.addr:
+        return True
+    return False
+
+
+def _refuse_app_breaking_stub(img, addr: Optional[int], label: str) -> Optional[str]:
+    """
+    Block mov eax,imm; ret on program entry.
+    Allowed on dedicated check helpers (authenticate, …) or non-entry VAs.
+    """
+    if addr is None:
+        return "cannot resolve patch address"
+    if label in _SAFE_STUB_NAMES:
+        return None
+    if _is_program_entry(img, addr, label):
+        return (
+            f"refused: stubbing {label}@{hex(addr)} would exit the app immediately; "
+            "patch a check function (authenticate/…) or use nop_bytes/force_branch at a specific VA"
+        )
+    return None
+
+
+def _default_patch_out(path: str, kind: Optional[str] = None) -> str:
+    return str(path) + ".patched"
+
+
+def _answer_from_stdin(stdin: bytes) -> str:
+    """Turn solver stdin bytes into a user-facing answer (no sample-specific constants)."""
+    import re
+
+    text = stdin.decode("latin1", errors="replace")
+    # Symbolic solves often pad with junk; pick longest alphanumeric token if any.
+    tokens = re.findall(r"[A-Za-z0-9_]{4,}", text)
+    if tokens:
+        return max(tokens, key=len)
+    return text.strip()
+
+
+def _pseudo_c_lift(
+    path: str,
+    fn: str,
+    *,
+    entry: Optional[int] = None,
+    max_blocks: int = _MAX_LIFT_BLOCKS,
+) -> tuple[str, dict]:
+    """Pseudo-C style lift after CFF adjacency cleanup (bounded for LLM context)."""
     from argus.binary import load_binary
     from argus.deobf.cff import cleaned_adjacency, recover_cff
-    from argus.disasm import build_function_cfg
+    from argus.disasm import build_cfg, build_function_cfg
 
     img = load_binary(path)
-    cfg = build_function_cfg(img, fn)
+    if fn in img.symbols:
+        cfg = build_function_cfg(img, fn)
+        label = fn
+    else:
+        addr, label = _resolve_addr(img, fn, entry)
+        if addr is None:
+            raise KeyError(f"cannot resolve lift target {fn!r}")
+        cfg = build_cfg(img, entry=addr, function_name=label, max_blocks=max_blocks)
     cff = recover_cff(cfg)
     adj = cleaned_adjacency(cfg, cff)
 
+    callees: List[dict] = []
+    for baddr, blk in cfg.blocks.items():
+        for ins in blk.instructions:
+            if ins.mnemonic != "call":
+                continue
+            callees.append(
+                {
+                    "from": hex(baddr),
+                    "at": hex(ins.address),
+                    "to": ins.op_str,
+                    "targets": [hex(t) for t in (ins.targets or [])],
+                }
+            )
+            if len(callees) >= _MAX_CALLEES:
+                break
+        if len(callees) >= _MAX_CALLEES:
+            break
+
+    total_blocks = len(cfg.blocks)
+    block_addrs = sorted(cfg.blocks)[:max_blocks]
+    truncated = total_blocks > max_blocks
+
     lines: List[str] = [
-        f"/* Argus lift: {fn} @ {hex(cfg.entry)} */",
+        f"/* Argus lift: {label} @ {hex(cfg.entry)} */",
         f"/* cff_cases={len(cff.case_map)} dispatcher="
         f"{hex(cff.dispatcher) if cff.dispatcher else 'none'} */",
-        f"int {fn}(/* args */) {{",
+        f"/* blocks={total_blocks} shown={len(block_addrs)} truncated={truncated} */",
+        f"int {label}(/* args */) {{",
     ]
-    for addr in sorted(cfg.blocks):
+    for addr in block_addrs:
         blk = cfg.blocks[addr]
         succs = adj.get(addr, list(blk.successors))
         lines.append(f"  L_{addr:x}:")
@@ -161,12 +286,34 @@ def _pseudo_c_lift(path: str, fn: str) -> tuple[str, dict]:
             "jmp", "ret", "je", "jz", "jne", "jnz",
         ):
             lines.append(f"    goto L_{succs[0]:x};")
+    if truncated:
+        lines.append(f"  /* … {total_blocks - max_blocks} blocks omitted */")
     lines.append("}")
     if cff.case_map:
         lines.append("/* state machine cases */")
-        for imm, tgt in sorted(cff.case_map.items()):
+        for imm, tgt in list(sorted(cff.case_map.items()))[:32]:
             lines.append(f"/* case {hex(imm)} → L_{tgt:x} */")
-    return "\n".join(lines), {"cff": cff.to_dict(), "blocks": len(cfg.blocks), "style": "pseudo_c"}
+
+    known = label in _AUTH_NAMES or label in img.symbols
+    if cff.case_map and known:
+        confidence = "high"
+    elif known and not truncated:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    evidence = {
+        "cff": cff.to_dict(),
+        "blocks": total_blocks,
+        "shown_blocks": len(block_addrs),
+        "style": "pseudo_c",
+        "callees": callees,
+        "confidence": confidence,
+        "truncated": truncated,
+        "entry": hex(cfg.entry),
+        "function": label,
+    }
+    return "\n".join(lines), evidence
 
 
 def _ir_blocks(path: str, fn: str) -> tuple[str, dict]:
@@ -205,19 +352,49 @@ def _encode_ret() -> bytes:
     return b"\xc3"
 
 
+def _seal_patch(
+    original_path: str,
+    output: str,
+    ok: bool,
+    cert: dict,
+    notes: List[str],
+    *,
+    answer_ok: str,
+) -> tuple[bool, dict, List[str], str]:
+    """Post-check patched file; if unsafe → ok=False + hint for LLM re-patch."""
+    if not ok:
+        return False, cert, notes, notes[0] if notes else "patch failed"
+    from argus.patch.safety import finalize_patch_safety
+
+    safe, cert2, extra = finalize_patch_safety(original_path, output, cert, remove_if_unsafe=True)
+    notes = notes + extra
+    if not safe:
+        reason = extra[0] if extra else "unsafe patch"
+        return False, cert2, notes, reason
+    return True, cert2, notes, answer_ok
+
+
 def _patch_always_const(path: str, fn: str, value: int, output: str) -> tuple[bool, dict, List[str]]:
     from argus.binary import load_binary
     from argus.patch import Patcher
+    from argus.patch.safety import preflight_patch
     from argus.prove.certificate import PatchCertificate
 
     img = load_binary(path)
-    if fn not in img.symbols:
+    addr, label = _resolve_addr(img, fn)
+    if addr is None:
         return False, {}, [f"function {fn} not found"]
-    addr = img.symbols[fn].addr
+    refuse = _refuse_app_breaking_stub(img, addr, label)
+    if refuse:
+        return False, {"proven": False, "notes": [refuse], "safety": {"safe": False, "reason": refuse}}, [refuse]
+    pre = preflight_patch(path, target_addr=addr, label=label, kind="always_true" if value else "always_false")
+    if not pre.get("safe"):
+        msg = pre.get("reason") or "preflight refused"
+        return False, {"proven": False, "safety": pre, "notes": [msg]}, [msg, pre.get("next_hint") or ""]
     payload = _encode_mov_eax_imm(value) + _encode_ret()
     patcher = Patcher.from_path(path)
-    ok = patcher.patch_bytes(addr, payload, note=f"{fn} := {value}; ret")
-    notes = [f"patch {fn}@{hex(addr)} -> mov eax,{value}; ret" if ok else "patch failed"]
+    ok = patcher.patch_bytes(addr, payload, note=f"{label} := {value}; ret")
+    notes = [f"patch {label}@{hex(addr)} -> mov eax,{value}; ret" if ok else "patch failed"]
     if not ok:
         return False, {}, notes
     patcher.nop(addr + len(payload), 10, note="pad after stub")
@@ -225,7 +402,7 @@ def _patch_always_const(path: str, fn: str, value: int, output: str) -> tuple[bo
     cert = PatchCertificate(
         patches=[{"addr": hex(addr), "new": payload.hex(), "note": f"always_{value}"}],
         proven=False,
-        notes=[f"function {fn} forced return {value}"],
+        notes=[f"function {label} forced return {value}"],
     )
     if img.fmt == "elf":
         v = patcher.verify_runs(stdin=b"x\ny\n")
@@ -240,7 +417,10 @@ def _patch_always_const(path: str, fn: str, value: int, output: str) -> tuple[bo
         elif v.get("ok"):
             cert.proven = True
             cert.notes.append("behavioral verify ran")
-    return True, cert.to_dict(), notes
+        if isinstance(cert.behavioral.get("stdout"), bytes):
+            cert.behavioral["stdout"] = cert.behavioral["stdout"].decode("latin1", errors="replace")
+    ok2, cert2, notes2, _ans = _seal_patch(path, output, True, cert.to_dict(), notes, answer_ok=f"forced return {value}")
+    return ok2, cert2, notes2
 
 
 def _nop_prompt_puts(path: str, output: str) -> tuple[bool, dict, List[str]]:
@@ -295,51 +475,129 @@ def _nop_prompt_puts(path: str, output: str) -> tuple[bool, dict, List[str]]:
         proven=False,
         notes=[f"nopped {n} prompt-related calls"],
     )
-    return n > 0, cert.to_dict(), [f"nop_prompts patched={n}"]
+    if n <= 0:
+        return False, cert.to_dict(), [f"nop_prompts patched={n}"]
+    ok2, cert2, notes2, _ = _seal_patch(
+        path, output, True, cert.to_dict(), [f"nop_prompts patched={n}"], answer_ok="nop prompts"
+    )
+    return ok2, cert2, notes2
 
 
-def _skip_check_patch(path: str, fn: str, output: str, note: str) -> tuple[bool, dict, List[str]]:
-    """NOP calls to strcmp in target function, or force always_true if none found."""
-    from argus.binary import load_binary
+def _nop_strcmp_in_function(img, patcher, fn: str) -> int:
+    """Replace strcmp/memcmp calls in fn with xor eax,eax. Returns patch count."""
     from argus.disasm import build_function_cfg
-    from argus.patch import Patcher
-    from argus.prove.certificate import PatchCertificate
 
-    img = load_binary(path)
     if fn not in img.symbols:
-        return _patch_always_const(path, fn if fn in img.symbols else _pick_function(img, None), 1, output)
-
+        return 0
     cfg = build_function_cfg(img, fn)
     strcmp_plt = {a for a, n in img.imports.items() if n.split("@")[0] in ("strcmp", "memcmp")}
-    patcher = Patcher.from_path(path)
     n = 0
     for blk in cfg.blocks.values():
         for ins in blk.instructions:
             if ins.mnemonic != "call" or not ins.targets:
                 continue
-            if ins.targets[0] in strcmp_plt or any(
-                abs(ins.targets[0] - p) < 16 for p in strcmp_plt
-            ):
-                # Replace call with xor eax,eax (strcmp equal) + nops
-                # xor eax,eax = 31 C0 ; pad rest
+            tgt = ins.targets[0]
+            if tgt in strcmp_plt or any(abs(tgt - p) < 16 for p in strcmp_plt):
                 if ins.size >= 2:
                     payload = b"\x31\xc0" + b"\x90" * (ins.size - 2)
                     if patcher.patch_bytes(ins.address, payload, note="skip_check strcmp→0"):
                         n += 1
+    return n
+
+
+def _skip_check_patch(path: str, fn: str, output: str, note: str) -> tuple[bool, dict, List[str]]:
+    """Surgical skip: NOP strcmp/memcmp in check fns. Never stub main/entry."""
+    from argus.binary import load_binary
+    from argus.patch import Patcher
+    from argus.prove.certificate import PatchCertificate
+
+    img = load_binary(path)
+    patcher = Patcher.from_path(path)
+    candidates: List[str] = []
+    if fn and fn not in _ENTRY_LABELS and fn in img.symbols:
+        candidates.append(fn)
+    for name in ("authenticate", "check_password", "verify", "target_function"):
+        if name in img.symbols and name not in candidates:
+            candidates.append(name)
+
+    n = 0
+    used: List[str] = []
+    for cand in candidates:
+        c = _nop_strcmp_in_function(img, patcher, cand)
+        if c:
+            n += c
+            used.append(cand)
+
     if n == 0:
-        return _patch_always_const(path, fn, 1, output)
+        for name in ("authenticate", "check_password", "verify", "target_function"):
+            if name in img.symbols:
+                return _patch_always_const(path, name, 1, output)
+        # Real apps: try surgical candidates from license-string xrefs
+        try:
+            from argus.find import find_in_binary
+            from argus.patch.intents import force_branch, nop_bytes
+
+            found = find_in_binary(path, "free version license trial", limit=20, with_xrefs=True)
+            cands = found.get("patch_candidates") or []
+        except Exception as e:
+            cands = []
+            notes_extra = [f"find_candidates_fail: {e}"]
+        else:
+            notes_extra = [f"candidates={len(cands)}"]
+
+        for c in cands[:8]:
+            try:
+                addr = int(c["addr"], 0)
+            except (TypeError, ValueError):
+                continue
+            if c.get("kind") == "force_branch":
+                ok, cert = force_branch(path, addr, output, taken=bool(c.get("taken", True)))
+            elif c.get("kind") == "nop_bytes":
+                ok, cert = nop_bytes(path, addr, int(c.get("size") or 5), output)
+            else:
+                continue
+            if not ok:
+                continue
+            ok2, cert2, notes2, _ = _seal_patch(
+                path,
+                output,
+                True,
+                cert,
+                notes_extra + [f"tried {c['kind']}@{c['addr']}: {c.get('reason')}"],
+                answer_ok=f"skip_check via {c['kind']}@{c['addr']}",
+            )
+            if ok2:
+                return ok2, cert2, notes2
+            # unsafe — try next candidate (file already removed by seal)
+
+        msg = (
+            "refused: no safe auth stub and no candidate passed safety; "
+            "inspect argus_find patch_candidates / argus_xrefs and pick another VA"
+        )
+        if cands:
+            msg += f"; tried {min(8, len(cands))} candidates"
+        return False, {"proven": False, "notes": [msg], "candidates": cands[:8]}, [msg] + notes_extra
+
     patcher.save(output)
     cert = PatchCertificate(
         patches=[{"addr": hex(p.addr), "note": p.note} for p in patcher.patches],
         proven=False,
-        notes=[f"skip_check nopped/zeroed {n} strcmp-like calls", note],
+        notes=[f"skip_check nopped/zeroed {n} strcmp-like calls in {used}", note],
     )
     if img.fmt == "elf":
         v = patcher.verify_runs(stdin=b"x\ny\n")
-        cert.behavioral = {"ok": v.get("ok"), "stdout": (v.get("stdout") or b"")[:120]}
+        stdout = v.get("stdout") or b""
+        if isinstance(stdout, bytes):
+            stdout_s = stdout[:120].decode("latin1", errors="replace")
+        else:
+            stdout_s = str(stdout)[:120]
+        cert.behavioral = {"ok": v.get("ok"), "stdout": stdout_s}
         if v.get("ok") and b"Welcome" in (v.get("stdout") or b""):
             cert.proven = True
-    return True, cert.to_dict(), [f"skip_check patches={n}"]
+    ok2, cert2, notes2, _ = _seal_patch(
+        path, output, True, cert.to_dict(), [f"skip_check patches={n} fns={used}"], answer_ok="skip_check"
+    )
+    return ok2, cert2, notes2
 
 
 def ask(path: str, hint: Hint) -> AskResult:
@@ -404,9 +662,7 @@ def ask(path: str, hint: Hint) -> AskResult:
         ok = bool(res.success and res.stdin)
         answer = None
         if ok and res.stdin is not None:
-            answer = res.stdin.decode("latin1", errors="replace").strip()
-            if b"SOSNEAKY" in res.stdin:
-                answer = "SOSNEAKY"
+            answer = _answer_from_stdin(res.stdin)
         return AskResult(
             ok=ok,
             want=hint.want.value,
@@ -422,7 +678,10 @@ def ask(path: str, hint: Hint) -> AskResult:
         )
 
     if hint.want == Want.LIFT:
-        if fn not in img.symbols:
+        try:
+            text, ev = _pseudo_c_lift(path, fn, entry=hint.entry)
+        except Exception as e:
+            notes.append(f"lift_fail: {e}")
             try:
                 from argus.deobf.vmp_trace import vmp_partial_lift
 
@@ -434,19 +693,19 @@ def ask(path: str, hint: Hint) -> AskResult:
                     readable=text,
                     evidence=ev,
                     certificate={"proven": False},
-                    notes=notes + ["lift_fallback_no_symbol"],
+                    notes=notes + ["lift_fallback"],
                 )
-            except Exception as e:
-                notes.append(f"lift_fallback_fail: {e}")
+            except Exception as e2:
+                notes.append(f"lift_fallback_fail: {e2}")
                 return AskResult(ok=False, want=hint.want.value, notes=notes)
-        text, ev = _pseudo_c_lift(path, fn)
+        conf = ev.get("confidence", "low")
         return AskResult(
             ok=True,
             want=hint.want.value,
-            answer=f"lifted {fn} ({ev['blocks']} blocks)",
+            answer=f"lifted {ev.get('function', fn)} ({ev.get('shown_blocks', ev.get('blocks'))} blocks, confidence={conf})",
             readable=text,
             evidence=ev,
-            certificate={"proven": False, "notes": ["pseudo-C structural lift"]},
+            certificate={"proven": False, "notes": ["pseudo-C structural lift", f"confidence={conf}"]},
             notes=notes,
         )
 
@@ -495,35 +754,142 @@ def ask(path: str, hint: Hint) -> AskResult:
 
     if hint.want == Want.PATCH:
         kind = hint.patch_kind or PatchKind.ALWAYS_TRUE
-        out = hint.output or (str(path) + f".{kind.value}")
+        out = hint.output or _default_patch_out(path, kind.value)
         if kind == PatchKind.ALWAYS_TRUE:
             ok, cert, n = _patch_always_const(path, fn, 1, out)
-            return AskResult(ok=ok, want=hint.want.value, answer="forced return 1", patched_path=out if ok else None, certificate=cert, notes=notes + n)
+            ans = "forced return 1" if ok else (n[0] if n else "patch refused")
+            return AskResult(
+                ok=ok,
+                want=hint.want.value,
+                answer=ans,
+                patched_path=out if ok else None,
+                certificate=cert,
+                evidence={"safety": (cert or {}).get("safety")},
+                notes=notes + n,
+            )
         if kind == PatchKind.ALWAYS_FALSE:
             ok, cert, n = _patch_always_const(path, fn, 0, out)
-            return AskResult(ok=ok, want=hint.want.value, answer="forced return 0", patched_path=out if ok else None, certificate=cert, notes=notes + n)
+            ans = "forced return 0" if ok else (n[0] if n else "patch refused")
+            return AskResult(
+                ok=ok,
+                want=hint.want.value,
+                answer=ans,
+                patched_path=out if ok else None,
+                certificate=cert,
+                evidence={"safety": (cert or {}).get("safety")},
+                notes=notes + n,
+            )
         if kind == PatchKind.UNFLATTEN:
             return ask(path, Hint(want=Want.DEOBF, function=fn, output=out, note=hint.note))
         if kind == PatchKind.NOP_PROMPTS:
             ok, cert, n = _nop_prompt_puts(path, out)
-            return AskResult(ok=ok, want=hint.want.value, answer="nop prompts", patched_path=out if ok else None, certificate=cert, notes=notes + n)
-        if kind == PatchKind.SKIP_CHECK:
-            ok, cert, n = _skip_check_patch(path, fn, out, hint.note)
-            return AskResult(ok=ok, want=hint.want.value, answer="skip_check", patched_path=out if ok else None, certificate=cert, notes=notes + n)
-        if kind == PatchKind.FORCE_BRANCH:
-            from argus.patch.intents import force_branch
-
-            if hint.branch_addr is None:
-                return AskResult(ok=False, want=hint.want.value, notes=notes + ["branch_addr required"])
-            ok, cert = force_branch(path, hint.branch_addr, out, taken=hint.force_taken)
+            ans = "nop prompts" if ok else (n[0] if n else "nop_prompts refused")
             return AskResult(
                 ok=ok,
                 want=hint.want.value,
-                answer="branch forced",
+                answer=ans,
                 patched_path=out if ok else None,
                 certificate=cert,
-                notes=notes,
+                evidence={"safety": (cert or {}).get("safety")},
+                notes=notes + n,
             )
+        if kind == PatchKind.SKIP_CHECK:
+            ok, cert, n = _skip_check_patch(path, fn, out, hint.note)
+            ans = "skip_check" if ok else (n[0] if n else "skip_check refused")
+            return AskResult(
+                ok=ok,
+                want=hint.want.value,
+                answer=ans,
+                patched_path=out if ok else None,
+                certificate=cert,
+                evidence={"safety": (cert or {}).get("safety")},
+                notes=notes + n,
+            )
+        if kind == PatchKind.FORCE_BRANCH:
+            from argus.patch.intents import force_branch
+
+            if hint.branch_addr is None and hint.patch_addr is None:
+                return AskResult(ok=False, want=hint.want.value, notes=notes + ["branch_addr required"])
+            addr = hint.branch_addr if hint.branch_addr is not None else hint.patch_addr
+            ok, cert = force_branch(path, int(addr), out, taken=hint.force_taken)
+            if ok:
+                ok, cert, n2, ans = _seal_patch(path, out, True, cert, [], answer_ok="branch forced")
+                return AskResult(
+                    ok=ok,
+                    want=hint.want.value,
+                    answer=ans,
+                    patched_path=out if ok else None,
+                    certificate=cert,
+                    evidence={"safety": (cert or {}).get("safety")},
+                    notes=notes + n2,
+                )
+            return AskResult(ok=False, want=hint.want.value, certificate=cert, notes=notes + ["force_branch failed"])
+        if kind == PatchKind.NOP_BYTES:
+            from argus.patch.intents import nop_bytes
+            from argus.patch.safety import preflight_patch
+
+            addr = hint.patch_addr if hint.patch_addr is not None else hint.branch_addr
+            size = hint.patch_size or 5
+            if addr is None:
+                return AskResult(ok=False, want=hint.want.value, notes=notes + ["patch_addr required for nop_bytes"])
+            pre = preflight_patch(path, target_addr=int(addr), label=hex(int(addr)), kind="nop_bytes")
+            # nop on entry is suspicious but allowed only if size is small? still check post
+            ok, cert = nop_bytes(path, int(addr), int(size), out)
+            if ok:
+                ok, cert, n2, ans = _seal_patch(
+                    path, out, True, cert, [], answer_ok=f"nop {size} bytes @ {hex(int(addr))}"
+                )
+                return AskResult(
+                    ok=ok,
+                    want=hint.want.value,
+                    answer=ans if ok else (n2[0] if n2 else "unsafe"),
+                    patched_path=out if ok else None,
+                    certificate=cert,
+                    evidence={"safety": (cert or {}).get("safety"), "preflight": pre},
+                    notes=notes + n2,
+                )
+            return AskResult(ok=False, want=hint.want.value, certificate=cert, notes=notes)
+        if kind == PatchKind.RET_IMM:
+            from argus.patch.intents import ret_imm
+            from argus.patch.safety import preflight_patch
+
+            addr, label = _resolve_addr(img, fn, hint.patch_addr if hint.patch_addr is not None else hint.entry)
+            if addr is None:
+                return AskResult(ok=False, want=hint.want.value, notes=notes + ["addr required for ret_imm"])
+            refuse = _refuse_app_breaking_stub(img, addr, label)
+            if refuse:
+                return AskResult(
+                    ok=False,
+                    want=hint.want.value,
+                    answer=refuse,
+                    certificate={"proven": False, "notes": [refuse], "safety": {"safe": False, "reason": refuse}},
+                    notes=notes + [refuse],
+                )
+            pre = preflight_patch(path, target_addr=addr, label=label, kind="ret_imm")
+            if not pre.get("safe"):
+                msg = pre.get("reason") or "preflight refused"
+                return AskResult(
+                    ok=False,
+                    want=hint.want.value,
+                    answer=msg,
+                    certificate={"proven": False, "safety": pre},
+                    notes=notes + [msg, pre.get("next_hint") or ""],
+                )
+            ok, cert = ret_imm(path, int(addr), int(hint.ret_value), out)
+            if ok:
+                ok, cert, n2, ans = _seal_patch(
+                    path, out, True, cert, [], answer_ok=f"ret_imm {hint.ret_value} @ {label}"
+                )
+                return AskResult(
+                    ok=ok,
+                    want=hint.want.value,
+                    answer=ans if ok else (n2[0] if n2 else "unsafe"),
+                    patched_path=out if ok else None,
+                    certificate=cert,
+                    evidence={"safety": (cert or {}).get("safety")},
+                    notes=notes + n2,
+                )
+            return AskResult(ok=False, want=hint.want.value, certificate=cert, notes=notes)
         return AskResult(ok=False, want=hint.want.value, notes=notes + [f"unknown patch_kind {kind}"])
 
     if hint.want == Want.REPORT:

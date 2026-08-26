@@ -29,6 +29,12 @@ def test_parse_lift():
     assert h.function == "authenticate"
 
 
+def test_parse_remove_license_check():
+    h = parse_prompt("убери проверку лицензии в authenticate")
+    assert h.want == Want.PATCH
+    assert h.patch_kind == PatchKind.SKIP_CHECK
+
+
 def test_ai_password_fla():
     r = ai(str(SAMPLES / "fauxware_fla"), "дай пароль для админа")
     assert r.ok

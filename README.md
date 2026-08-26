@@ -16,29 +16,41 @@ pip install -e ".[dev,concrete]"
 # optional: pip install torch upx
 ```
 
-## LLM recipe (preferred)
+## Real LLM agent (OpenAI-compatible **or native Gemini AI Studio**)
+
+### Gemini (AI Studio) — recommended for Google keys
+
+Get a key at https://aistudio.google.com/apikey (usually starts with `AIza…`).
+
+```bash
+source .venv/bin/activate
+export GEMINI_API_KEY="AIza..."          # or ARGUS_GEMINI_API_KEY
+export ARGUS_LLM_PROVIDER=gemini
+export ARGUS_GEMINI_MODEL=gemini-2.0-flash   # or gemini-3.7-flash if available on your key
+
+argus agent --provider gemini "дай пароль для админа" samples/fauxware_fla -v
+```
+
+Native endpoint (not a website — browser GET → 404 is normal):
+
+```text
+POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=API_KEY
+```
+
+### OpenAI-compatible (OpenAI / OpenRouter / Gemini openai shim)
+
+```bash
+export ARGUS_OPENAI_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/"
+export ARGUS_OPENAI_API_KEY="AIza..."
+export ARGUS_OPENAI_MODEL="gemini-2.0-flash"
+argus agent --provider openai "дай пароль" samples/fauxware -v
+```
+
+Without a cloud model, use the regex router:
 
 ```bash
 argus ai "дай пароль для админа" samples/fauxware_fla
-# → SOSNEAKY
-
-argus ai "сделай always true для authenticate" samples/fauxware -o /tmp/bypass.bin
-argus ai "покажи код функции authenticate" samples/fauxware_fla
-argus ai "деобфусцируй" samples/fauxware_fla -o /tmp/x.deobf
-argus ai "что за защита" samples/vmp/adder.vmp.exe
 ```
-
-Python:
-
-```python
-from argus import ai
-r = ai("samples/fauxware_fla", "дай пароль для админа")
-print(r.answer)  # SOSNEAKY
-```
-
-Tool schema: `from argus import TOOL_SCHEMA`.
-
-Structured API still available: `argus ask FILE --want password`.
 
 ## Classic CLI
 

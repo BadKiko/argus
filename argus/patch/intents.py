@@ -61,3 +61,17 @@ def nop_call(path: str, addr: int, size: int, output: str) -> Tuple[bool, Dict[s
         notes=["nop_call"],
     )
     return ok, cert.to_dict()
+
+
+def nop_bytes(path: str, addr: int, size: int, output: str) -> Tuple[bool, Dict[str, Any]]:
+    """NOP `size` bytes at VA (alias of nop_call with clearer name)."""
+    patcher = Patcher.from_path(path)
+    ok = patcher.nop(addr, size, note="nop_bytes")
+    if ok:
+        patcher.save(output)
+    cert = PatchCertificate(
+        patches=[{"addr": hex(addr), "size": size, "note": "nop_bytes"}],
+        proven=False,
+        notes=[f"nop_bytes size={size}"],
+    )
+    return ok, cert.to_dict()
