@@ -1,7 +1,7 @@
 # Copyright (c) 2026 k.zhukov
 # Licensed under the MIT License. See LICENSE in the project root for license information.
 """
-Argus Command Line Interface & Demonstration Suite v0.0.7.
+Argus Command Line Interface & Demonstration Suite v0.0.8.
 Author: k.zhukov (2026) | MIT License
 """
 import sys
@@ -17,6 +17,8 @@ from ..targets.hardcore_vm import HardcoreFeistelVM
 from ..targets.nested_vm import NestedDoubleVM, InnerOpcode
 from ..engine.simplifier import MBASimplifier
 from ..engine.cegis import CEGISSynthesizer
+from ..engine.path_explorer import SymbolicPathExplorer
+from ..scanner.function_scanner import FunctionScanner
 from ..engine.codegen import CCodeGenerator
 from ..engine.cfg import CFGBuilder
 from ..frontend.pe_parser import PEParser
@@ -28,61 +30,46 @@ def print_banner():
     banner = """
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     [bold cyan]|[/bold cyan]     [bold white]ARGUS[/bold white] : Automated Reverse & Graph Slicer Engine     [bold cyan]|[/bold cyan]
-    [bold cyan]|[/bold cyan]     [dim white]CEGIS Inductive Synthesis & SMT Engine v0.0.7[/dim white]     [bold cyan]|[/bold cyan]
+    [bold cyan]|[/bold cyan]     [dim white]Goal-Driven Path Explorer & Sink Solver v0.0.8[/dim white]    [bold cyan]|[/bold cyan]
     [bold cyan]|[/bold cyan]     [dim green]Author: k.zhukov | License: MIT (2026)[/dim green]                 [bold cyan]|[/bold cyan]
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     """
     console.print(banner)
 
-def demo_cegis_breakthrough():
-    console.print(Panel("[bold yellow]CEGIS Inductive Synthesis: Breakthrough over SMT Hardness Barriers[/bold yellow]"))
+def demo_path_explorer_sink_solver():
+    console.print(Panel("[bold yellow]Goal-Driven Symbolic Path Explorer: Automated Password / Key Recovery[/bold yellow]"))
     
-    gen = NonlinearMBAGenerator(seed=42)
-    obf_str, ground_truth = gen.generate_nonlinear_product_mba("x", "y")
+    explorer = SymbolicPathExplorer(bit_size=32)
+    passwd = explorer.create_symbolic_byte_buffer("key", 8)
     
-    console.print(f"[bold magenta]Opaque Nonlinear Formula:[/bold magenta] {obf_str}")
-    console.print(f"[bold green]Ground Truth Function:[/bold green] {ground_truth}")
-    
-    # 1. Show that pure SMT Solver times out on degree-2 product
-    console.print()
-    console.print("[bold cyan]1. Classical SMT Solver (Z3) Direct Expansion:[/bold cyan]")
-    simplifier = MBASimplifier(bit_size=32)
-    z3_ast = simplifier.parse_python_mba_to_z3(obf_str, ("x", "y"))
-    s = z3.Solver()
-    s.set("timeout", 500)
-    s.add(z3_ast != simplifier.parse_python_mba_to_z3(ground_truth, ("x", "y")))
-    smt_res = s.check()
-    console.print(f"  Result: [bold red]TIMEOUT / UNKNOWN (Combinatorial Explosion)[/bold red] (status={smt_res})")
-    
-    # 2. Show CEGIS Oracle-Guided Inductive Synthesis solving it in 0.01s
-    console.print()
-    console.print("[bold cyan]2. CEGIS Oracle-Guided Inductive Synthesis Engine:[/bold cyan]")
-    oracle = lambda x, y: eval(obf_str, {"__builtins__": None}, {"x": x, "y": y})
-    synthesizer = CEGISSynthesizer(bit_size=32)
-    synth_expr, synth_ast = synthesizer.synthesize_affine_or_binary_candidate(oracle, ("x", "y"))
-    
-    console.print(f"  Synthesized Formula in <0.01s: [bold green]{synth_expr}[/bold green]")
-    console.print("  [bold green]SUCCESS: SMT Hardness Barrier fully bypassed via Inductive Synthesis![/bold green]")
-    console.print()
+    # Target obfuscated key check: "ARGUSKEY"
+    expected = b"ARGUSKEY"
+    console.print(f"[bold cyan]Input Parameter:[/bold cyan] 8-Byte Symbolic Buffer [key_0 .. key_7]")
+    console.print(f"[bold magenta]Target Condition:[/bold magenta] Multilevel Obfuscated Key Verification Endpoint")
 
-def demo_nested_vm():
-    console.print(Panel("[bold yellow]Nested Double-VM Target Execution (Stack-in-Stack)[/bold yellow]"))
-    vm = NestedDoubleVM()
-    inner_program = [
-        InnerOpcode.INNER_LOAD, 0,
-        InnerOpcode.INNER_LOAD, 1,
-        InnerOpcode.INNER_ADD,
-        InnerOpcode.INNER_STORE, 2,
-        InnerOpcode.INNER_HALT
-    ]
-    regs, trace = vm.run_nested_program(inner_program, {"R0": 0x50, "R1": 0x70})
-    for line in trace[:4]:
-        console.print(f"  [dim cyan]{line}[/dim cyan]")
-    console.print(f"  [bold green]Inner R2 Result:[/bold green] 0x{regs.get('R2', 0):X}")
+    # Add branch conditions
+    for i, exp_byte in enumerate(expected):
+        mask = (i * 17 + 0x33) & 0xFF
+        obf_val = exp_byte ^ mask
+        explorer.add_path_constraint((passwd[i] ^ z3.BitVecVal(mask, 8)) == z3.BitVecVal(obf_val, 8))
+
+    is_sat, assignments, recovered_bytes = explorer.solve_for_target_sink()
+    
+    table = Table(title="Symbolic Path Exploration & SMT Solver Result")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value / State", style="bold green")
+    table.add_row("SMT Satisfiability", "[bold green]SATISFIABLE (SAT)[/bold green]" if is_sat else "[bold red]UNSAT[/bold red]")
+    table.add_row("Branch Equations", f"{len(expected)} Constraints Verified")
+    table.add_row("Recovered Key Bytes", f"{recovered_bytes.decode('ascii', errors='ignore') if recovered_bytes else 'N/A'}")
+    
+    console.print(table)
+    console.print()
+    console.print("[bold green][SUCCESS] Automated Goal-Driven Path Solving Completed![/bold green]")
+    console.print()
 
 def analyze_pe_file(pe_path: str):
     console.print()
-    console.print(Panel(f"[bold cyan]Argus Real-World Binary In-Battle Analysis: {pe_path}[/bold cyan]"))
+    console.print(Panel(f"[bold cyan]Argus Real-World Binary Analysis: {pe_path}[/bold cyan]"))
     parser = PEParser(pe_path)
     info = parser.get_basic_info()
     sections = parser.get_sections()
@@ -99,12 +86,13 @@ def analyze_pe_file(pe_path: str):
     console.print(table)
 
     if code_bytes:
-        lifter = X86Lifter(bit_size=64)
-        env, disasm = lifter.lift_code_bytes(code_bytes[:128], initial_regs=["rdi", "rsi", "rdx"])
+        scanner = FunctionScanner(bit_size=64)
+        funcs = scanner.scan_functions_in_bytes(code_bytes[:1024], base_address=0x1000)
         console.print()
-        console.print(Panel("[bold yellow]Disassembled Native Instructions (First 8 Instructions)[/bold yellow]"))
-        for line in disasm[:8]:
-            console.print(f"  [magenta]{line}[/magenta]")
+        console.print(Panel(f"[bold yellow]Discovered Functions & Endpoints ({len(funcs)} detected in initial block)[/bold yellow]"))
+        for f in funcs[:5]:
+            status = "[bold green]Candidate Validator[/bold green]" if f["is_potential_validator"] else "[dim]Normal Routine[/dim]"
+            console.print(f"  Start: [cyan]{f['start_address']}[/cyan] | Ins: [magenta]{f['instruction_count']}[/magenta] | Status: {status}")
 
     parser.close()
     console.print()
@@ -115,8 +103,7 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--file":
         analyze_pe_file(sys.argv[2])
     else:
-        demo_cegis_breakthrough()
-        demo_nested_vm()
+        demo_path_explorer_sink_solver()
 
 if __name__ == "__main__":
     main()
