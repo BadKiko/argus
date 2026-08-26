@@ -64,7 +64,7 @@ def detect_protection(image: BinaryImage) -> ProtectionReport:
         scores["themida"] += 0.3
         indicators.append("filename themida")
     if "vmp" in path_l or ".vmp." in path_l:
-        scores["vmp"] += 0.25
+        scores["vmp"] += 0.55
         indicators.append("filename vmp")
 
     # OLLVM: many conditional blocks / symbols often still present; weak static signal

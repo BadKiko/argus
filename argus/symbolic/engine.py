@@ -38,6 +38,9 @@ class Engine:
             "printf": self.hook_printf,
             "read": self.hook_read,
             "strcmp": self.hook_strcmp,
+            "memcmp": self.hook_memcmp,
+            "strlen": self.hook_strlen,
+            "fgets": self.hook_fgets,
             "open": self.hook_open,
             "exit": self.hook_exit,
             "__libc_start_main": self.hook_libc_start_main,
@@ -496,6 +499,84 @@ class Engine:
             equal = z3.And(*eqs) if eqs else z3.BoolVal(True)
             state.set_reg("rax", z3.If(equal, z3.BitVecVal(0, 64), z3.BitVecVal(1, 64)))
             state.regs["_zf"] = z3.If(equal, z3.BitVecVal(1, 8), z3.BitVecVal(0, 8))
+        self._return(state)
+
+    def hook_strlen(self, eng: "Engine", state: SimState) -> None:
+        ptr = conc_or_none(state.get_reg("rdi"))
+        if ptr is None:
+            state.halted = True
+            return
+        n = 0
+        for i in range(4096):
+            b = conc_or_none(state.mem.load_byte(ptr + i))
+            if b is None:
+                # symbolic length unknown — constrain weakly
+                state.set_reg("rax", z3.BitVec("strlen_ret", 64))
+                self._return(state)
+                return
+            if b == 0:
+                break
+            n += 1
+        state.set_reg("rax", n)
+        self._return(state)
+
+    def hook_memcmp(self, eng: "Engine", state: SimState) -> None:
+        # treat like strcmp but bounded by rdx
+        a = conc_or_none(state.get_reg("rdi"))
+        b = conc_or_none(state.get_reg("rsi"))
+        n = conc_or_none(state.get_reg("rdx")) or 64
+        if a is None or b is None:
+            state.halted = True
+            return
+        eqs = []
+        concrete_diff = 0
+        fully_concrete = True
+        for i in range(min(int(n), 256)):
+            ca = state.mem.load_byte(a + i)
+            cb = state.mem.load_byte(b + i)
+            cac, cbc = conc_or_none(ca), conc_or_none(cb)
+            if cac is not None and cbc is not None:
+                if cac != cbc:
+                    concrete_diff = cac - cbc
+                    break
+                continue
+            fully_concrete = False
+            av = ca if isinstance(ca, z3.ExprRef) else z3.BitVecVal(int(ca) & 0xFF, 8)
+            bv = cb if isinstance(cb, z3.ExprRef) else z3.BitVecVal(int(cb) & 0xFF, 8)
+            if av.size() != 8:
+                av = z3.Extract(7, 0, as_bv(av, 64))
+            if bv.size() != 8:
+                bv = z3.Extract(7, 0, as_bv(bv, 64))
+            eqs.append(av == bv)
+        if fully_concrete:
+            state.set_reg("rax", concrete_diff & 0xFFFFFFFFFFFFFFFF)
+            state.regs["_zf"] = 1 if concrete_diff == 0 else 0
+        else:
+            equal = z3.And(*eqs) if eqs else z3.BoolVal(True)
+            state.set_reg("rax", z3.If(equal, z3.BitVecVal(0, 64), z3.BitVecVal(1, 64)))
+            state.regs["_zf"] = z3.If(equal, z3.BitVecVal(1, 8), z3.BitVecVal(0, 8))
+        self._return(state)
+
+    def hook_fgets(self, eng: "Engine", state: SimState) -> None:
+        buf = conc_or_none(state.get_reg("rdi"))
+        size = conc_or_none(state.get_reg("rsi")) or 64
+        if buf is None:
+            state.halted = True
+            return
+        n = max(0, min(int(size) - 1, 128))
+        wrote = 0
+        for i in range(n):
+            if state.stdin_pos >= len(state.stdin):
+                break
+            byte = state.stdin[state.stdin_pos]
+            state.stdin_pos += 1
+            state.mem.store_byte(buf + i, byte)
+            wrote += 1
+            bc = conc_or_none(byte)
+            if bc == 0x0A:
+                break
+        state.mem.store_byte(buf + wrote, 0)
+        state.set_reg("rax", buf)
         self._return(state)
 
     def hook_open(self, eng: "Engine", state: SimState) -> None:

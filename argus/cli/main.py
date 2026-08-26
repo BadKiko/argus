@@ -339,6 +339,39 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ai(args: argparse.Namespace) -> int:
+    """Natural language: argus ai \"дай пароль для админа\" app.exe"""
+    import json
+
+    from argus.nl import ai, parse_prompt
+
+    hint = parse_prompt(args.prompt, output=args.output)
+    console.print(f"intent want={hint.want.value} patch={hint.patch_kind} fn={hint.function!r}")
+    res = ai(args.binary, args.prompt, output=args.output)
+    if args.json:
+        Path(args.json).write_text(json.dumps(res.to_dict(), indent=2))
+        console.print(f"wrote {args.json}")
+    # Human/agent primary output
+    if res.ok and res.readable and res.want in ("lift", "ir", "report"):
+        console.print(res.readable[:8000], markup=False)
+    elif res.ok and res.answer:
+        console.print(res.answer)
+    elif res.ok and res.readable:
+        console.print(res.readable[:8000], markup=False)
+    elif res.ok and res.patched_path:
+        console.print(res.patched_path)
+    else:
+        console.print(f"failed: {'; '.join(res.notes)}")
+        if args.verbose:
+            console.print(json.dumps(res.to_dict(), indent=2))
+        return 1
+    if args.verbose:
+        console.print(json.dumps(res.to_dict(), indent=2))
+    if res.patched_path and res.answer:
+        console.print(f"patched {res.patched_path}")
+    return 0 if res.ok else 1
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     """LLM-facing intent API: hint in → answer / readable / patched out."""
     import json
@@ -374,16 +407,58 @@ def cmd_ask(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
+    import json
     import time
+    from pathlib import Path
 
     from argus.binary import load_binary
-    from argus.deobf import recover_cff
-    from argus.disasm import build_function_cfg
+    from argus.deobf import detect_protection, recover_cff
+    from argus.disasm import build_cfg, build_function_cfg
+
+    if args.corpus:
+        root = Path(args.corpus)
+        rows = []
+        for p in sorted(root.rglob("*")):
+            if not p.is_file() or p.suffix.lower() in (".md", ".txt", ".json"):
+                continue
+            if p.stat().st_size > 50_000_000:
+                continue
+            try:
+                t0 = time.perf_counter()
+                img = load_binary(str(p))
+                prot = detect_protection(img)
+                cfg = build_cfg(img, entry=img.entry, max_blocks=200)
+                ms = (time.perf_counter() - t0) * 1000
+                rows.append(
+                    {
+                        "path": str(p.relative_to(root)),
+                        "fmt": img.fmt,
+                        "protection": prot.kind,
+                        "blocks": len(cfg.blocks),
+                        "ms": round(ms, 2),
+                    }
+                )
+            except Exception as e:
+                rows.append({"path": str(p), "error": str(e)})
+        text = json.dumps({"n": len(rows), "rows": rows}, indent=2)
+        if args.json:
+            Path(args.json).write_text(text)
+            console.print(f"wrote {args.json}")
+        else:
+            console.print(text)
+        return 0
+
+    if not args.binary:
+        console.print("eval: need binary or --corpus")
+        return 2
 
     img = load_binary(args.binary)
     fn = args.function or "main"
     t0 = time.perf_counter()
-    cfg = build_function_cfg(img, fn)
+    if fn in img.symbols:
+        cfg = build_function_cfg(img, fn)
+    else:
+        cfg = build_cfg(img, entry=img.entry, max_blocks=400)
     t1 = time.perf_counter()
     cff = recover_cff(cfg)
     t2 = time.perf_counter()
@@ -479,20 +554,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     ask_p = sp.add_parser(
         "ask",
-        help="LLM intent API: password | lift | patch | deobf | report",
+        help="Structured intent API (prefer: argus ai \"…\" binary)",
     )
     ask_p.add_argument("binary")
     ask_p.add_argument(
         "--want",
         required=True,
-        choices=["password", "lift", "patch", "deobf", "report"],
+        choices=["password", "lift", "patch", "deobf", "report", "ir"],
         help="What the model needs back",
     )
     ask_p.add_argument("-f", "--function", help="Target function hint")
     ask_p.add_argument("--hint", default="", help="Free-text hint from the LLM")
     ask_p.add_argument(
         "--patch-kind",
-        choices=["always_true", "always_false", "unflatten", "nop_prompts", "force_branch"],
+        choices=["always_true", "always_false", "unflatten", "nop_prompts", "force_branch", "skip_check"],
     )
     ask_p.add_argument("-o", "--output", help="Patched/deobf output path")
     ask_p.add_argument("--find", default="Welcome", help="Success needle for password")
@@ -502,9 +577,19 @@ def build_parser() -> argparse.ArgumentParser:
     ask_p.add_argument("--json", help="Write AskResult JSON")
     ask_p.set_defaults(func=cmd_ask)
 
-    ev = sp.add_parser("eval", help="Timing metrics (ms/function)")
-    ev.add_argument("binary")
+    ai_p = sp.add_parser("ai", help='Natural language: argus ai "дай пароль" app.exe')
+    ai_p.add_argument("prompt", help="Request in Russian or English")
+    ai_p.add_argument("binary", help="Path to ELF/PE (Windows paths ok)")
+    ai_p.add_argument("-o", "--output", help="Output path for patch/deobf")
+    ai_p.add_argument("--json", help="Also write full AskResult JSON")
+    ai_p.add_argument("-v", "--verbose", action="store_true", help="Dump full result")
+    ai_p.set_defaults(func=cmd_ai)
+
+    ev = sp.add_parser("eval", help="Timing metrics (ms/function) or --corpus scan")
+    ev.add_argument("binary", nargs="?", default=None)
     ev.add_argument("-f", "--function", default="main")
+    ev.add_argument("--corpus", help="Scan sample tree; emit JSON metrics")
+    ev.add_argument("--json", help="Write corpus JSON")
     ev.set_defaults(func=cmd_eval)
 
     return p

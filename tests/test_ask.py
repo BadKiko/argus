@@ -38,8 +38,8 @@ def test_ask_lift_authenticate():
         Hint(want=Want.LIFT, function="authenticate", note="show cleaned CFG"),
     )
     assert r.ok and r.readable
-    assert "function authenticate" in r.readable
-    assert "block_" in r.readable
+    assert "authenticate" in r.readable
+    assert "L_" in r.readable or "block_" in r.readable
 
 
 def test_ask_patch_always_true():

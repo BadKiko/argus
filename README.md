@@ -1,75 +1,85 @@
-"""Argus — certified hybrid binary deobfuscation.
+"""Argus 0.2.0 — certified hybrid binary deobfuscation for LLM agents.
 
-## Thesis (what makes this different)
+## Thesis
 
-Most tools either:
+> **ML/LLM proposes. Mathematics proves. Patches ship only with a certificate.**
 
-- trust heuristics/ML and silently drop code, or
-- run heavy symbolic execution on the full obfuscated CFG.
-
-Argus is built around a stricter contract:
-
-> **ML proposes. Mathematics proves. Patches ship only with a certificate.**
-
-1. **Propose** junk / dispatcher structure (heuristics or ResGCN)
-2. **Prove** each drop (unreachable, nop-only, or no side-effects off sink paths) — otherwise **keep**
-3. **Recover** CFF via **state-variable analysis** (not only hub heuristics)
-4. **Patch** with an explicit certificate (syntactic + optional behavioral verify)
-5. Emit a machine-readable **`argus certify`** report
-
-This is not a universal VMProtect unpacker. It is a framework for *proof-carrying* deobfuscation that can grow with real datasets.
+The agent speaks natural language; Argus executes a strong pipeline and returns
+a password, readable lift, or a patched binary.
 
 ## Install
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
-pip install torch   # optional: GNN train/infer
+pip install -e ".[dev,concrete]"
+# optional: pip install torch upx
 ```
 
-## Quick start
+## LLM recipe (preferred)
+
+```bash
+argus ai "дай пароль для админа" samples/fauxware_fla
+# → SOSNEAKY
+
+argus ai "сделай always true для authenticate" samples/fauxware -o /tmp/bypass.bin
+argus ai "покажи код функции authenticate" samples/fauxware_fla
+argus ai "деобфусцируй" samples/fauxware_fla -o /tmp/x.deobf
+argus ai "что за защита" samples/vmp/adder.vmp.exe
+```
+
+Python:
+
+```python
+from argus import ai
+r = ai("samples/fauxware_fla", "дай пароль для админа")
+print(r.answer)  # SOSNEAKY
+```
+
+Tool schema: `from argus import TOOL_SCHEMA`.
+
+Structured API still available: `argus ask FILE --want password`.
+
+## Classic CLI
 
 ```bash
 argus analyze samples/fauxware
-argus solve samples/fauxware                 # finds SOSNEAKY
-argus prune samples/fauxware -f main         # proof-carrying prune
-argus deobf samples/fauxware_fla -f authenticate
-argus certify samples/fauxware_fla -f authenticate -o /tmp/cert.json
-argus mba
-argus patch samples/fauxware --nop 0x4007d5 4 --verify -o /tmp/fw.patched
+argus solve samples/fauxware --deobf
+argus deobf samples/fauxware_fla -f authenticate --patch /tmp/out --all-cff --verify
+argus certify samples/fauxware_fla -f authenticate --solve
+argus eval --corpus samples --json /tmp/corpus.json
+argus run samples/fauxware_fla -f authenticate -o /tmp/run.bin
 ```
 
 ## Sample corpus
 
-Research/CTF binaries under [`samples/`](samples/MANIFEST.md):
+See [`samples/MANIFEST.md`](samples/MANIFEST.md).
 
-- **OLLVM CFF** — Linux/Windows from ollvm-unflattener + fauxware_fla
-- **VMProtect 3** — hello_world/adder/switch/… + Salwan samples + UltraSec crackme
-- **Themida** — protected hello_world
+- OLLVM CFF ELF/PE — recover + unflatten + (ELF) solve-after-deobf
+- VMP tiny — detect + stub + partial handler lift (`ask`/`ai` lift)
+- Themida/ultrasec — load/detect smoke only (not full unpack in 0.2.0)
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q
-argus cfg samples/vmp/hello_world.vmp.exe --entry 0x140011267
-argus deobf samples/ollvm/CFF_full_linux64.bin -f target_function
 ```
-
-Upstream clones (optional) go in `third_party/` (gitignored).
 
 ## Layout
 
 | Package | Role |
 |---------|------|
+| `argus.nl` / `argus.ask` | `argus ai` natural language + intent |
 | `argus.binary` | ELF/PE loaders |
 | `argus.disasm` | Capstone CFG |
-| `argus.symbolic` | crackme explorer (Z3) |
-| `argus.ml` | features + ResGCN propose |
-| `argus.prove` | deadness / patch certificates |
-| `argus.deobf` | CFF state recovery, toy VM synth |
-| `argus.mba` | MBA equivalence proofs |
-| `argus.patch` | binary patch + verify |
-| `argus.eval` | JSON reports / metrics |
-| `legacy/` | archived prototype |
+| `argus.symbolic` | concolic-friendly Z3 explorer |
+| `argus.concrete` | Unicorn runner + concolic seeds |
+| `argus.deobf` | CFF unflatten, MBA/bogus, VMP partial |
+| `argus.patch` | intents + UPX + verify |
+| `argus.ml` | ResGCN proposer (optional torch) |
+| `argus.prove` | certificates |
+
+## Non-goals (0.2.0)
+
+Universal VMProtect/Themida commercial unpack. 100% on arbitrary binaries without an agent hint.
 
 ## License
 

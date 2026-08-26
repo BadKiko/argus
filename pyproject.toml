@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "argus-re"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hybrid binary analysis: CFG, conservative GNN prune, SMT solve, patch"
 readme = "README.md"
 license = { text = "MIT" }
@@ -36,3 +36,8 @@ exclude = ["legacy*", "tests*", "samples*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "ask: LLM ask/ai API",
+  "ollvm: OLLVM corpus",
+  "vmp_partial: VMP partial layer",
+]

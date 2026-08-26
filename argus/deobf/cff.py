@@ -174,6 +174,26 @@ def extract_dispatcher_cases(cfg: CFG, dispatcher: int, state_slot: str) -> Dict
                     if nxt.is_conditional and nxt.mnemonic in ("je", "jz") and nxt.targets and imm is not None:
                         cases[imm & 0xFFFFFFFF] = nxt.targets[0]
                         break
+            elif ins.mnemonic == "cmp" and len(parts) == 2:
+                # switch-style: cmp reg/mem, imm ; je handler
+                left, right = parts[0], parts[1]
+                imm = _parse_imm_token(right)
+                if imm is None:
+                    imm = _parse_imm_token(left)
+                stateish = (left.lower() in state_regs) or is_state_mem(left) or is_state_mem(right)
+                if imm is not None and stateish:
+                    for j in range(i + 1, min(i + 4, len(blk.instructions))):
+                        nxt = blk.instructions[j]
+                        if nxt.is_conditional and nxt.mnemonic in ("je", "jz") and nxt.targets:
+                            cases[imm & 0xFFFFFFFF] = nxt.targets[0]
+                            break
+            elif ins.mnemonic == "jmp" and "[" in ins.op_str:
+                # jmp qword ptr [reg*8 + table] — record table base if immediate present
+                m = re.search(r"0x[0-9a-f]+", ins.op_str, re.I)
+                if m:
+                    notes_table = int(m.group(0), 16)
+                    # cannot resolve without memory; leave marker via alias note later
+                    _ = notes_table
         for s in blk.successors:
             if s not in seen:
                 queue.append(s)

@@ -1,21 +1,24 @@
 # Sample corpus (research / CTF only)
 
-Educational and research binaries for Argus tests. **Not malware droppers** — published crackmes and protector research samples.
+Educational and research binaries for Argus tests. **Not malware droppers**.
 
-| Path | Origin | Protection | Argus expectation (today) |
-|------|--------|------------|---------------------------|
-| `fauxware` / `ollvm/fauxware_plain` | angr | none | `solve` → `SOSNEAKY` |
-| `fauxware_fla` / `ollvm/fauxware_fla` | OLLVM CFF | CFF | `deobf`/`certify` state recovery |
-| `ollvm/CFF*.bin` | [ollvm-unflattener](https://github.com/cdong1012/ollvm-unflattener) | OLLVM CFF | load + CFG + CFF cases |
-| `ollvm/CFF_win*.exe` | same | OLLVM CFF (PE) | load + entry CFG |
-| `vmp/*.vmp.exe` | [VirtualizationObfuscatorAnalysis](https://github.com/mzakocs/VirtualizationObfuscatorAnalysis) | VMProtect 3 | load + entry CFG smoke |
-| `vmp/sample*.vmp.bin` | [VMProtect-devirtualization](https://github.com/JonathanSalwan/VMProtect-devirtualization) | VMProtect | load + entry CFG smoke |
-| `vmp/ultrasec.vmp.exe` | [Ultrasec-VMP](https://github.com/voksireimagined/Ultrasec-VMP) | VMProtect crackme | load smoke |
-| `pe/hello_world_themida_protected.exe` | VOA Themida | Themida | load smoke |
-| `pe/angr_test_sample.exe` | angr | PE large | load + entry CFG |
+| Path | Origin | Protection | Argus 0.2.0 expectation |
+|------|--------|------------|-------------------------|
+| `fauxware` | angr | none | `ai "пароль"` → `SOSNEAKY` |
+| `fauxware_fla` | OLLVM CFF | CFF | `ai "пароль"` → `SOSNEAKY`; unflatten+patch |
+| `ollvm/CFF_full_linux64.bin` | ollvm-unflattener | CFF | lift/`case_map≥2` + unflatten certify |
+| `ollvm/CFF*.bin` / `CFF_win*.exe` | same | CFF | load+CFG; PE unflatten when cases found |
+| `vmp/sample1.vmp.bin` / `adder.vmp.exe` | Salwan / VOA | VMP | detect + partial lift/handlers |
+| `vmp/ultrasec.vmp.exe` | UltraSec | VMP | load/detect smoke only |
+| `pe/hello_world_themida_protected.exe` | VOA | Themida | detect smoke |
 
-Upstream clones (optional, large) live under `third_party/` and are gitignored.
+## Ground truth (password)
+
+| Binary | Secret |
+|--------|--------|
+| `fauxware` | `SOSNEAKY` |
+| `fauxware_fla` | `SOSNEAKY` |
 
 ## License / ethics
 
-Use only for reverse-engineering research and tool evaluation. Do not redistribute as weaponized packs.
+Research and tool evaluation only.

@@ -4,6 +4,7 @@ from argus.deobf.unflatten import UnflattenResult, apply_unflatten, deobf_and_pa
 from argus.deobf.vm import HandlerSynthesizer, VMReport, decode_toy_bytecode
 from argus.deobf.vmp_layer import VMPLayerReport, analyze_vmp_layer
 from argus.deobf.bogus import BogusCFReport, analyze_bogus_cf, prove_mba_catalog
+from argus.deobf.vmp_trace import UnicornVMPTrace, vmp_partial_lift
 
 __all__ = [
     "CFFReport",
@@ -24,4 +25,6 @@ __all__ = [
     "analyze_bogus_cf",
     "BogusCFReport",
     "prove_mba_catalog",
+    "UnicornVMPTrace",
+    "vmp_partial_lift",
 ]
