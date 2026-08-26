@@ -78,3 +78,21 @@ def mba_x_plus_y(x: z3.BitVecRef, y: z3.BitVecRef) -> z3.BitVecRef:
 def mba_x_xor_y(x: z3.BitVecRef, y: z3.BitVecRef) -> z3.BitVecRef:
     # (x | y) - (x & y) == x ^ y
     return (x | y) - (x & y)
+
+
+def mba_x_and_y(x: z3.BitVecRef, y: z3.BitVecRef) -> z3.BitVecRef:
+    # (x + y) - (x | y) == x & y
+    return (x + y) - (x | y)
+
+
+def mba_x_or_y(x: z3.BitVecRef, y: z3.BitVecRef) -> z3.BitVecRef:
+    # (x + y) - (x & y) == x | y
+    return (x + y) - (x & y)
+
+
+MBA_CATALOG = [
+    ("x+y", mba_x_plus_y),
+    ("x^y", mba_x_xor_y),
+    ("x&y", mba_x_and_y),
+    ("x|y", mba_x_or_y),
+]

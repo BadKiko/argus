@@ -14,6 +14,7 @@ console = Console()
 
 def cmd_analyze(args: argparse.Namespace) -> int:
     from argus.binary import load_binary
+    from argus.deobf import detect_protection
 
     img = load_binary(args.binary)
     table = Table(title=f"Argus analyze: {Path(args.binary).name}")
@@ -25,6 +26,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     table.add_row("sections", str(len(img.sections)))
     table.add_row("symbols", str(len(img.symbols)))
     table.add_row("imports/PLT", str(len(img.imports)))
+    prot = detect_protection(img)
+    table.add_row("protection", f"{prot.kind} ({prot.confidence:.2f})")
     console.print(table)
     if args.imports:
         for addr, name in sorted(img.imports.items()):
@@ -58,7 +61,12 @@ def cmd_cfg(args: argparse.Namespace) -> int:
 def cmd_solve(args: argparse.Namespace) -> int:
     from argus.symbolic import solve_binary
 
-    res = solve_binary(args.binary)
+    if args.deobf:
+        from argus.deobf import solve_after_deobf
+
+        res = solve_after_deobf(args.binary)
+    else:
+        res = solve_binary(args.binary)
     console.print(f"success={res.success} paths={res.paths_explored} msg={res.message}")
     if res.stdin is not None:
         console.print(f"stdin bytes: {res.stdin!r}")
@@ -98,7 +106,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
 def cmd_deobf(args: argparse.Namespace) -> int:
     from argus.binary import load_binary
-    from argus.deobf import recover_cff
+    from argus.deobf import deobf_and_patch, recover_cff
     from argus.disasm import build_function_cfg
     from argus.eval import ArgusReport
 
@@ -107,12 +115,37 @@ def cmd_deobf(args: argparse.Namespace) -> int:
     cfg = build_function_cfg(img, fn)
     report = recover_cff(cfg)
     console.print(f"dispatcher={hex(report.dispatcher) if report.dispatcher else None}")
-    console.print(f"state_slot={report.state_slot!r}")
+    console.print(f"state_slot={report.state_slot!r}", markup=False)
     console.print(f"cases={len(report.case_map)} edges={len(report.recovered_edges)}")
     for n in report.notes:
         console.print(f"  {n}", markup=False)
     for imm, tgt in list(report.case_map.items())[:12]:
         console.print(f"  case {hex(imm)} -> {hex(tgt)}")
+
+    patch_info = None
+    if args.patch:
+        fns = [fn]
+        if args.all_cff:
+            # also patch main/authenticate companions
+            for extra in ("main", "authenticate", "target_function"):
+                if extra in img.symbols and extra not in fns:
+                    fns.append(extra)
+        result = deobf_and_patch(
+            args.binary,
+            fns,
+            args.patch,
+            verify_stdin=(args.stdin.encode() if args.stdin else b""),
+        )
+        console.print(f"[green]patched[/green] {args.patch} applied={result.patches_applied}")
+        for n in result.notes:
+            console.print(f"  {n}", markup=False)
+        patch_info = result.to_dict()
+        if args.verify and img.fmt == "elf":
+            from argus.patch import Patcher
+
+            v = Patcher.from_path(args.patch).verify_runs(stdin=args.stdin.encode() if args.stdin else b"")
+            console.print(f"verify ok={v.get('ok')} rc={v.get('returncode')} stdout={v.get('stdout', b'')[:80]!r}")
+
     if args.json:
         rep = ArgusReport(
             binary=str(args.binary),
@@ -120,6 +153,8 @@ def cmd_deobf(args: argparse.Namespace) -> int:
             entry=hex(img.entry),
             functions=[fn],
             cff=report.to_dict(),
+            patches=[patch_info] if patch_info else [],
+            patch_certificate=patch_info.get("certificate") if patch_info else None,
         )
         Path(args.json).write_text(rep.to_json())
         console.print(f"wrote {args.json}")
@@ -127,12 +162,15 @@ def cmd_deobf(args: argparse.Namespace) -> int:
 
 
 def cmd_mba(args: argparse.Namespace) -> int:
+    from argus.deobf import prove_mba_catalog
     from argus.mba import MBASimplifier, mba_x_plus_y, mba_x_xor_y
 
     s = MBASimplifier(32)
     for name, fn in [("plus_mba", mba_x_plus_y), ("xor_mba", mba_x_xor_y)]:
         r = s.simplify_binary_expr(fn)
         console.print(f"{name}: simplified={r.simplified} proved={r.proved}")
+    for row in prove_mba_catalog():
+        console.print(row)
     return 0
 
 
@@ -162,9 +200,9 @@ def cmd_patch(args: argparse.Namespace) -> int:
 
 
 def cmd_certify(args: argparse.Namespace) -> int:
-    """Full certified pipeline: prune-with-proof + CFF state recovery + optional solve."""
+    """Full certified pipeline: prune-with-proof + CFF + MBA/bogus + optional solve."""
     from argus.binary import load_binary
-    from argus.deobf import recover_cff
+    from argus.deobf import analyze_bogus_cf, prove_mba_catalog, recover_cff, solve_after_deobf
     from argus.disasm import build_function_cfg
     from argus.eval import ArgusReport
     from argus.ml import Pruner
@@ -176,9 +214,14 @@ def cmd_certify(args: argparse.Namespace) -> int:
     pruner = Pruner(require_proof=True)
     pr = pruner.prune(cfg)
     cff = recover_cff(cfg)
+    bogus = analyze_bogus_cf(cfg)
+    mba = prove_mba_catalog()
     solve = None
     if args.solve:
-        res = solve_binary(args.binary)
+        if cff.case_map:
+            res = solve_after_deobf(args.binary)
+        else:
+            res = solve_binary(args.binary)
         solve = {
             "success": res.success,
             "stdin": None if res.stdin is None else res.stdin.decode("latin1", errors="replace"),
@@ -192,7 +235,11 @@ def cmd_certify(args: argparse.Namespace) -> int:
         entry=hex(img.entry),
         functions=[fn],
         prune={"backend": pr.backend, "kept": len(pr.kept), "pruned": [hex(a) for a in pr.pruned]},
-        certificate=cert,
+        certificate={
+            "prune": cert,
+            "mba": mba,
+            "bogus": bogus.to_dict(),
+        },
         cff=cff.to_dict(),
         solve=solve,
         notes=[
@@ -209,7 +256,8 @@ def cmd_certify(args: argparse.Namespace) -> int:
     console.print(
         f"[bold green]certify[/bold green] prune_approved="
         f"{len(pruner.last_certificate.approved) if pruner.last_certificate else 0} "
-        f"cff_cases={len(cff.case_map)} edges={len(cff.recovered_edges)}"
+        f"cff_cases={len(cff.case_map)} edges={len(cff.recovered_edges)} "
+        f"bogus={len(bogus.hits)}"
     )
     return 0
 
@@ -270,6 +318,82 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0 if model is not None else 1
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    from argus.pipeline import run_pipeline
+
+    res = run_pipeline(
+        args.binary,
+        function=args.function,
+        output=args.output,
+        verify_stdin=args.stdin.encode() if args.stdin else b"",
+        do_patch=not args.no_patch,
+    )
+    text = res.report.to_json()
+    if args.json:
+        Path(args.json).write_text(text)
+        console.print(f"wrote {args.json}")
+    else:
+        console.print(text)
+    if res.output_path:
+        console.print(f"[green]output[/green] {res.output_path}")
+    return 0
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    """LLM-facing intent API: hint in → answer / readable / patched out."""
+    import json
+
+    from argus.ask import Hint, PatchKind, Want, ask
+
+    want = Want(args.want)
+    patch_kind = PatchKind(args.patch_kind) if args.patch_kind else None
+    hint = Hint(
+        want=want,
+        function=args.function,
+        entry=int(args.entry, 0) if args.entry else None,
+        patch_kind=patch_kind,
+        find=args.find.encode() if args.find else b"Welcome",
+        output=args.output,
+        note=args.hint or "",
+        force_taken=not args.force_not_taken,
+        branch_addr=int(args.branch, 0) if args.branch else None,
+    )
+    res = ask(args.binary, hint)
+    if args.json:
+        Path(args.json).write_text(json.dumps(res.to_dict(), indent=2))
+        console.print(f"wrote {args.json}")
+    else:
+        console.print(json.dumps(res.to_dict(), indent=2))
+    if res.answer:
+        console.print(f"[bold green]answer[/bold green] {res.answer}")
+    if res.readable and not args.json:
+        console.print(res.readable[:2000], markup=False)
+    if res.patched_path:
+        console.print(f"[green]patched[/green] {res.patched_path}")
+    return 0 if res.ok else 1
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    import time
+
+    from argus.binary import load_binary
+    from argus.deobf import recover_cff
+    from argus.disasm import build_function_cfg
+
+    img = load_binary(args.binary)
+    fn = args.function or "main"
+    t0 = time.perf_counter()
+    cfg = build_function_cfg(img, fn)
+    t1 = time.perf_counter()
+    cff = recover_cff(cfg)
+    t2 = time.perf_counter()
+    console.print(
+        f"fn={fn} blocks={len(cfg.blocks)} cfg_ms={(t1-t0)*1000:.1f} "
+        f"cff_ms={(t2-t1)*1000:.1f} cases={len(cff.case_map)}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="argus",
@@ -292,6 +416,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("solve", help="Symbolic solve (ELF crackme)")
     s.add_argument("binary")
+    s.add_argument("--deobf", action="store_true", help="Unflatten CFF then solve")
     s.set_defaults(func=cmd_solve)
 
     pr = sp.add_parser("prune", help="Proof-carrying CFG prune")
@@ -301,9 +426,13 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--no-proof", action="store_true", help="Allow ML-only drops (unsafe)")
     pr.set_defaults(func=cmd_prune)
 
-    d = sp.add_parser("deobf", help="CFF state-variable recovery")
+    d = sp.add_parser("deobf", help="CFF state-variable recovery + optional patch")
     d.add_argument("binary")
     d.add_argument("-f", "--function", default="main")
+    d.add_argument("--patch", help="Write unflattened binary")
+    d.add_argument("--verify", action="store_true", help="Run patched ELF smoke verify")
+    d.add_argument("--stdin", default="", help="stdin for verify")
+    d.add_argument("--all-cff", action="store_true", help="Also unflatten main/authenticate if present")
     d.add_argument("--json", help="Write report JSON")
     d.set_defaults(func=cmd_deobf)
 
@@ -338,6 +467,45 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("-o", "--output")
     r.add_argument("--solve", action="store_true")
     r.set_defaults(func=cmd_report)
+
+    run = sp.add_parser("run", help="Detect → deobf classes → patch → verify")
+    run.add_argument("binary")
+    run.add_argument("-f", "--function")
+    run.add_argument("-o", "--output", help="Patched binary path")
+    run.add_argument("--json", help="Certificate bundle JSON")
+    run.add_argument("--stdin", default="")
+    run.add_argument("--no-patch", action="store_true")
+    run.set_defaults(func=cmd_run)
+
+    ask_p = sp.add_parser(
+        "ask",
+        help="LLM intent API: password | lift | patch | deobf | report",
+    )
+    ask_p.add_argument("binary")
+    ask_p.add_argument(
+        "--want",
+        required=True,
+        choices=["password", "lift", "patch", "deobf", "report"],
+        help="What the model needs back",
+    )
+    ask_p.add_argument("-f", "--function", help="Target function hint")
+    ask_p.add_argument("--hint", default="", help="Free-text hint from the LLM")
+    ask_p.add_argument(
+        "--patch-kind",
+        choices=["always_true", "always_false", "unflatten", "nop_prompts", "force_branch"],
+    )
+    ask_p.add_argument("-o", "--output", help="Patched/deobf output path")
+    ask_p.add_argument("--find", default="Welcome", help="Success needle for password")
+    ask_p.add_argument("--entry", help="Optional entry VA")
+    ask_p.add_argument("--branch", help="VA for force_branch")
+    ask_p.add_argument("--force-not-taken", action="store_true")
+    ask_p.add_argument("--json", help="Write AskResult JSON")
+    ask_p.set_defaults(func=cmd_ask)
+
+    ev = sp.add_parser("eval", help="Timing metrics (ms/function)")
+    ev.add_argument("binary")
+    ev.add_argument("-f", "--function", default="main")
+    ev.set_defaults(func=cmd_eval)
 
     return p
 

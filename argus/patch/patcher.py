@@ -79,7 +79,13 @@ class Patcher:
         return self.patch_bytes(vaddr, bytes([inv[op]]), note="invert branch")
 
     def save(self, path: str) -> str:
+        import os
+
         Path(path).write_bytes(bytes(self.data))
+        try:
+            os.chmod(path, 0o755)
+        except OSError:
+            pass
         return path
 
     def verify_runs(self, argv_extra: Optional[List[str]] = None, stdin: bytes = b"", timeout: float = 2.0) -> dict:

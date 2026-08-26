@@ -43,6 +43,13 @@ def test_tier_a_fauxware_fla_cff():
     assert len(report.case_map) >= 4
 
 
+def test_tier_a_fauxware_fla_solve_after_deobf():
+    from argus.deobf import solve_after_deobf
+
+    res = solve_after_deobf(str(_need("fauxware_fla")))
+    assert res.success and res.stdin and b"SOSNEAKY" in res.stdin
+
+
 # --- Tier B: OLLVM ----------------------------------------------------------
 
 OLLVM_ELF64 = [

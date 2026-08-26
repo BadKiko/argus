@@ -190,10 +190,35 @@ class Engine:
         if mnem == "nop":
             return finish(state)
 
-        if mnem == "mov":
+        if mnem in ("mov", "movabs"):
             val = self._read_operand(state, insn, 1)
             self._write_operand(state, insn, 0, val)
             return finish(state)
+
+        if mnem in ("cmove", "cmovz", "cmovne", "cmovnz"):
+            # conditional move based on ZF
+            zf = state.regs.get("_zf", 0)
+            zfc = conc_or_none(zf)
+            src = self._read_operand(state, insn, 1)
+            take_if_eq = mnem in ("cmove", "cmovz")
+            if zfc is not None:
+                if (zfc == 1) if take_if_eq else (zfc == 0):
+                    self._write_operand(state, insn, 0, src)
+                return finish(state)
+            # symbolic: fork
+            s_t = state.clone()
+            s_f = state.clone()
+            zf_bv = as_bv(zf, 8)
+            if take_if_eq:
+                s_t.constraints.append(zf_bv == 1)
+                s_f.constraints.append(zf_bv == 0)
+            else:
+                s_t.constraints.append(zf_bv == 0)
+                s_f.constraints.append(zf_bv == 1)
+            self._write_operand(s_t, insn, 0, src)
+            s_t.ip = nxt
+            s_f.ip = nxt
+            return [s_t, s_f]
 
         if mnem == "lea":
             # lea reg, [mem]

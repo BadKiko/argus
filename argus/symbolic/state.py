@@ -16,7 +16,12 @@ def is_symbolic(v: Value) -> bool:
 
 def as_bv(v: Value, bits: int = 64) -> BV:
     if isinstance(v, z3.ExprRef):
-        return v
+        sz = v.size()
+        if sz == bits:
+            return v
+        if sz > bits:
+            return z3.Extract(bits - 1, 0, v)
+        return z3.ZeroExt(bits - sz, v)
     return z3.BitVecVal(int(v) & ((1 << bits) - 1), bits)
 
 

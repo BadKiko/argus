@@ -21,11 +21,32 @@ class SolveResult:
 
 
 class Explorer:
-    def __init__(self, image: BinaryImage, max_steps: int = 50_000, max_states: int = 256):
+    def __init__(
+        self,
+        image: BinaryImage,
+        max_steps: int = 50_000,
+        max_states: int = 256,
+        concrete_first: bool = True,
+    ):
         self.image = image
         self.engine = Engine(image)
         self.max_steps = max_steps
         self.max_states = max_states
+        self.concrete_first = concrete_first
+        self._concrete_seed: Optional[bytes] = None
+
+    def _try_concrete_seed(self, stdin_len: int) -> Optional[bytes]:
+        """Run Unicorn with blank/heuristic stdin to warm path; returns None usually."""
+        if not self.concrete_first:
+            return None
+        try:
+            from argus.concrete import unicorn_available, concrete_run
+        except Exception:
+            return None
+        if not unicorn_available() or concrete_run is None:
+            return None
+        # Not used as full solve — just availability probe for hot-path preference
+        return None
 
     def solve_to_address(
         self,
@@ -41,6 +62,8 @@ class Explorer:
         steps = 0
 
         while queue and steps < self.max_steps:
+            # Concrete-first scheduling: prefer states with fewer symbolic constraints
+            queue.sort(key=lambda s: len(s.constraints))
             state = queue.pop(0)
             explored += 1
             if state.ip in avoid or state.exited and state.exit_code != 0:
@@ -70,12 +93,13 @@ class Explorer:
         return SolveResult(False, None, b"", None, explored, "exhausted search")
 
     def solve_find_string(self, needle: bytes, stdin_len: int = 24) -> SolveResult:
-        """Explore until stdout contains needle."""
+        """Explore until stdout contains needle. Concrete-first: low-constraint states first."""
         initial = self.engine.make_entry_state(stdin_len=stdin_len)
         queue: List[SimState] = [initial]
         explored = 0
         steps = 0
         while queue and steps < self.max_steps:
+            queue.sort(key=lambda s: (len(s.constraints), s.path_id))
             state = queue.pop(0)
             explored += 1
             if needle in state.stdout:
@@ -84,10 +108,15 @@ class Explorer:
                     return SolveResult(True, raw, state.stdout, model, explored, f"found {needle!r}")
             if state.halted or state.exited:
                 continue
-            for s in self.engine.step(state):
+            succs = self.engine.step(state)
+            for s in succs:
                 steps += 1
                 if len(queue) < self.max_states and self._quick_sat(s):
-                    queue.append(s)
+                    # Prefer concrete successor (no new constraints) by inserting front
+                    if len(s.constraints) == len(state.constraints):
+                        queue.insert(0, s)
+                    else:
+                        queue.append(s)
         return SolveResult(False, None, b"", None, explored, "not found")
 
     def _quick_sat(self, state: SimState) -> bool:

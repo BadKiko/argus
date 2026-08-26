@@ -37,9 +37,6 @@ class HandlerSynthesizer:
         for name, sim, z3fn in candidates:
             if all(oracle(a, b) == sim(a, b) for a, b in probes):
                 # Prove over random additional samples + SMT on mismatch search budget
-                x = z3.BitVec("x", self.bits)
-                y = z3.BitVec("y", self.bits)
-                # We cannot put python oracle in Z3; verify more concrete samples
                 import random
 
                 rng = random.Random(0)
@@ -51,6 +48,23 @@ class HandlerSynthesizer:
                         ok = False
                         break
                 return HandlerSynthResult(name, name, ok)
+        return HandlerSynthResult("unknown", "?", False)
+
+    def synthesize_from_samples(self, samples: List[Tuple[int, int, int]]) -> HandlerSynthResult:
+        """Match handler name against concrete (a,b,result) triples only."""
+        if not samples:
+            return HandlerSynthResult("unknown", "?", False)
+        candidates: List[Tuple[str, Callable[[int, int], int]]] = [
+            ("add", lambda a, b: (a + b) & self.mask),
+            ("sub", lambda a, b: (a - b) & self.mask),
+            ("xor", lambda a, b: (a ^ b) & self.mask),
+            ("and", lambda a, b: (a & b) & self.mask),
+            ("or", lambda a, b: (a | b) & self.mask),
+            ("mul", lambda a, b: (a * b) & self.mask),
+        ]
+        for name, sim in candidates:
+            if all(sim(a, b) == (r & self.mask) for a, b, r in samples):
+                return HandlerSynthResult(name, name, True)
         return HandlerSynthResult("unknown", "?", False)
 
 
