@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.dmp
+builder.py
+setup_project.py
+init_builder.py
