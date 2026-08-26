@@ -1,7 +1,7 @@
 # Copyright (c) 2026 k.zhukov
 # Licensed under the MIT License. See LICENSE in the project root for license information.
 """
-Argus Command Line Interface & Demonstration Suite v0.3.0.
+Argus Command Line Interface & Demonstration Suite v0.0.5.
 Author: k.zhukov (2026) | MIT License
 """
 import sys
@@ -17,6 +17,9 @@ from ..targets.complex_license_vm import ComplexLicenseValidatorVM
 from ..engine.devirtualizer import AutomatedDevirtualizer
 from ..engine.codegen import CCodeGenerator
 from ..engine.cfg import CFGBuilder
+from ..frontend.x86_lifter import X86Lifter
+from ..frontend.pe_parser import PEParser
+from ..ai.junk_classifier import MLJunkClassifier
 
 console = Console(force_terminal=True, legacy_windows=False)
 
@@ -24,7 +27,7 @@ def print_banner():
     banner = """
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     [bold cyan]|[/bold cyan]     [bold white]ARGUS[/bold white] : Automated Reverse & Graph Slicer Engine     [bold cyan]|[/bold cyan]
-    [bold cyan]|[/bold cyan]     [dim white]Symbolic De-obfuscator & Decompiler v0.3.0[/dim white]        [bold cyan]|[/bold cyan]
+    [bold cyan]|[/bold cyan]     [dim white]Symbolic De-obfuscator & Decompiler v0.0.5[/dim white]        [bold cyan]|[/bold cyan]
     [bold cyan]|[/bold cyan]     [dim green]Author: k.zhukov | License: MIT (2026)[/dim green]                 [bold cyan]|[/bold cyan]
     [bold cyan]+-------------------------------------------------------+[/bold cyan]
     """
@@ -33,15 +36,12 @@ def print_banner():
 def demo_full_pipeline():
     console.print(Panel("[bold yellow]Argus Automated De-virtualization & C Decompilation Pipeline[/bold yellow]"))
     
-    # 1. Target Generation
     vm = ComplexLicenseValidatorVM(seed=123)
     program = vm.generate_complex_validation_suite()
     
-    # 2. CFG Recovery
     cfg_builder = CFGBuilder()
     graph = cfg_builder.build_from_bytecode(program)
     
-    # 3. Symbolic De-virtualization
     devirt = AutomatedDevirtualizer(bit_size=32)
     recovered_ast, stats = devirt.devirtualize_program(
         bytecode=program,
@@ -49,7 +49,6 @@ def demo_full_pipeline():
         target_var="AUTH_TOKEN"
     )
     
-    # 4. C Code Generation
     codegen = CCodeGenerator(function_name="validate_and_derive_token")
     c_source = codegen.generate_c_function(recovered_ast, input_params=["HWID_IN", "LICENSE_KEY"])
     
@@ -69,40 +68,33 @@ def demo_full_pipeline():
     syntax = Syntax(c_source, "c", theme="monokai", line_numbers=True)
     console.print(syntax)
 
-def demo_x86_lifter():
-    from ..frontend.x86_lifter import X86Lifter
+def demo_pe_parser():
     console.print()
-    console.print(Panel("[bold yellow]x86_64 Binary Machine Code Lifter (Capstone -> Z3 AST)[/bold yellow]"))
+    console.print(Panel("[bold yellow]PE/COFF Executable Binary Analysis Demo[/bold yellow]"))
     
-    # Real x86_64 shellcode: mov rax, rdi; add rax, rsi; xor rax, 0x42
-    shellcode = b"\x48\x89\xf8\x48\x01\xf0\x48\x83\xf0\x42"
-    lifter = X86Lifter(bit_size=64)
-    env, disasm = lifter.lift_code_bytes(shellcode, initial_regs=["rdi", "rsi"])
+    test_exe = r"C:\Windows\System32\cmd.exe"
+    parser = PEParser(test_exe)
+    info = parser.get_basic_info()
+    sections = parser.get_sections()
+    code_bytes = parser.extract_text_section_bytes()
     
-    console.print("[bold cyan]Disassembled Native Instructions:[/bold cyan]")
-    for line in disasm:
-        console.print(f"  [magenta]{line}[/magenta]")
-    console.print(f"\n[bold green]Recovered Symbolic RAX Formula:[/bold green] {env.get('rax')}")
-
-def demo_ai_dataset():
-    from ..ai.dataset_gen import AIDatasetGenerator
-    console.print()
-    console.print(Panel("[bold yellow]AI/LLM Neural De-obfuscation Dataset Synthesizer[/bold yellow]"))
+    table = Table(title=f"PE Binary Metadata: {info['file_name']}")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="bold green")
     
-    gen = AIDatasetGenerator(seed=42)
-    sample = gen.generate_sample(1)
+    table.add_row("Architecture", info["architecture"])
+    table.add_row("Entry Point RVA", info["entry_point_rva"])
+    table.add_row("Image Base", info["image_base"])
+    table.add_row("Total Sections", str(info["number_of_sections"]))
+    table.add_row(".text Section Size", f"{len(code_bytes)} bytes" if code_bytes else "N/A")
     
-    console.print(f"[bold cyan]Synthesized Sample ID:[/bold cyan] {sample['id']} ({sample['type']})")
-    console.print(f"[bold magenta]Obfuscated Input:[/bold magenta] {sample['obfuscated_expression']}")
-    console.print(f"[bold green]Ground Truth Target:[/bold green] {sample['ground_truth']}")
-    console.print(f"[bold yellow]SMT Verified Equivalent:[/bold yellow] {sample['smt_verified']}")
+    console.print(table)
+    parser.close()
 
 def main():
     print_banner()
     demo_full_pipeline()
-    demo_x86_lifter()
-    demo_ai_dataset()
+    demo_pe_parser()
 
 if __name__ == "__main__":
     main()
-

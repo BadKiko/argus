@@ -3,3 +3,4 @@ networkx>=3.0
 pytest>=7.0.0
 rich>=13.0.0
 capstone>=5.0.0
+pefile>=2024.8.26
