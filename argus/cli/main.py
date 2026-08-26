@@ -19,6 +19,8 @@ from ..engine.simplifier import MBASimplifier
 from ..engine.cegis import CEGISSynthesizer
 from ..engine.codegen import CCodeGenerator
 from ..engine.cfg import CFGBuilder
+from ..frontend.pe_parser import PEParser
+from ..frontend.x86_lifter import X86Lifter
 
 console = Console(force_terminal=True, legacy_windows=False)
 
@@ -78,10 +80,43 @@ def demo_nested_vm():
         console.print(f"  [dim cyan]{line}[/dim cyan]")
     console.print(f"  [bold green]Inner R2 Result:[/bold green] 0x{regs.get('R2', 0):X}")
 
+def analyze_pe_file(pe_path: str):
+    console.print()
+    console.print(Panel(f"[bold cyan]Argus Real-World Binary In-Battle Analysis: {pe_path}[/bold cyan]"))
+    parser = PEParser(pe_path)
+    info = parser.get_basic_info()
+    sections = parser.get_sections()
+    code_bytes = parser.extract_text_section_bytes()
+
+    table = Table(title=f"PE Metadata: {info['file_name']}")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="bold green")
+    table.add_row("Architecture", info["architecture"])
+    table.add_row("Entry Point RVA", info["entry_point_rva"])
+    table.add_row("Image Base", info["image_base"])
+    table.add_row("Total Sections", str(info["number_of_sections"]))
+    table.add_row(".text Section Size", f"{len(code_bytes):,} bytes" if code_bytes else "N/A")
+    console.print(table)
+
+    if code_bytes:
+        lifter = X86Lifter(bit_size=64)
+        env, disasm = lifter.lift_code_bytes(code_bytes[:128], initial_regs=["rdi", "rsi", "rdx"])
+        console.print()
+        console.print(Panel("[bold yellow]Disassembled Native Instructions (First 8 Instructions)[/bold yellow]"))
+        for line in disasm[:8]:
+            console.print(f"  [magenta]{line}[/magenta]")
+
+    parser.close()
+    console.print()
+    console.print("[bold green][OK] Binary Analysis Completed Successfully![/bold green]")
+
 def main():
     print_banner()
-    demo_cegis_breakthrough()
-    demo_nested_vm()
+    if len(sys.argv) > 2 and sys.argv[1] == "--file":
+        analyze_pe_file(sys.argv[2])
+    else:
+        demo_cegis_breakthrough()
+        demo_nested_vm()
 
 if __name__ == "__main__":
     main()
