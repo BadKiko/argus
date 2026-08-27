@@ -450,6 +450,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         want=want,
         function=args.function,
         entry=int(args.entry, 0) if args.entry else None,
+        query=getattr(args, "query", None),
         patch_kind=patch_kind,
         find=args.find.encode() if args.find else None,
         output=args.output,
@@ -469,6 +470,30 @@ def cmd_ask(args: argparse.Namespace) -> int:
         console.print(res.readable[:2000], markup=False)
     if res.patched_path:
         console.print(f"[green]patched[/green] {res.patched_path}")
+    return 0 if res.ok else 1
+
+
+def cmd_lift(args: argparse.Namespace) -> int:
+    """Universal stripped/named annotated lift."""
+    import json
+
+    from argus.ask import Hint, Want, ask
+
+    hint = Hint(
+        want=Want.IR if args.ir else Want.LIFT,
+        function=args.function,
+        entry=int(args.entry, 0) if args.entry else None,
+        query=args.query,
+        note=args.query or "",
+    )
+    res = ask(args.binary, hint)
+    if args.json:
+        Path(args.json).write_text(json.dumps(res.to_dict(), indent=2))
+        console.print(f"wrote {args.json}")
+    if res.answer:
+        console.print(f"[bold]{res.answer}[/bold]")
+    if res.readable:
+        console.print(res.readable, markup=False)
     return 0 if res.ok else 1
 
 
@@ -649,10 +674,23 @@ def build_parser() -> argparse.ArgumentParser:
     ask_p.add_argument("-o", "--output", help="Patched/deobf output path")
     ask_p.add_argument("--find", default=None, help="Success needle for password (required for password want)")
     ask_p.add_argument("--entry", help="Optional entry VA")
+    ask_p.add_argument("--query", help="String query → xref → function (stripped lift)")
     ask_p.add_argument("--branch", help="VA for force_branch")
     ask_p.add_argument("--force-not-taken", action="store_true")
     ask_p.add_argument("--json", help="Write AskResult JSON")
     ask_p.set_defaults(func=cmd_ask)
+
+    lift_p = sp.add_parser(
+        "lift",
+        help="Annotated pseudo-C lift (VA / function / string query; works on stripped ELF)",
+    )
+    lift_p.add_argument("binary")
+    lift_p.add_argument("-f", "--function", help="Symbol name, sub_HEX, or 0xVA")
+    lift_p.add_argument("--entry", help="Code VA to lift (hex/dec)")
+    lift_p.add_argument("--query", help="String in binary → xref → covering function")
+    lift_p.add_argument("--json", help="Write AskResult JSON")
+    lift_p.add_argument("--ir", action="store_true", help="Emit JSON IR instead of pseudo-C")
+    lift_p.set_defaults(func=cmd_lift)
 
     ai_p = sp.add_parser("ai", help='Natural language router (no LLM): argus ai "дай пароль" app.exe')
     ai_p.add_argument("prompt", help="Request in Russian or English")

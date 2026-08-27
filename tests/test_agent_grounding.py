@@ -118,6 +118,8 @@ def test_dispatch_patch_always_true_writes_file(tmp_path):
 def test_tools_include_find_and_new_patch_kinds():
     names = {t["function"]["name"] for t in ARGUS_TOOLS}
     assert "argus_find" in names
+    assert "argus_unlock_apply" in names
+    assert "argus_slice" in names
     patch = next(t for t in ARGUS_TOOLS if t["function"]["name"] == "argus_patch")
     kinds = patch["function"]["parameters"]["properties"]["kind"]["enum"]
     assert "nop_bytes" in kinds and "ret_imm" in kinds and "force_branch" in kinds
@@ -146,6 +148,33 @@ def test_refuse_stub_main():
     )
     assert r.ok is False
     assert "refused" in (r.answer or "").lower() or any("refused" in n for n in r.notes)
+
+
+def test_ret_imm_explicit_va_not_refused_as_main(tmp_path):
+    """Default function label 'main' must not block ret_imm at an explicit non-entry VA."""
+    import shutil
+
+    src = tmp_path / "fauxware"
+    shutil.copy(SAMPLES / "fauxware", src)
+    from argus.binary import load_binary
+
+    img = load_binary(str(src))
+    auth = img.symbols["authenticate"].addr
+    assert auth != img.entry
+    out = tmp_path / "auth.patched"
+    r = ask(
+        str(src),
+        Hint(
+            want=Want.PATCH,
+            patch_kind=PatchKind.RET_IMM,
+            # no function= → _pick_function defaults to main; patch_addr is the real target
+            patch_addr=auth,
+            ret_value=1,
+            output=str(out),
+        ),
+    )
+    assert r.ok, r.answer or r.notes
+    assert out.exists()
 
 
 def test_skip_check_still_patches_authenticate(tmp_path):

@@ -254,17 +254,51 @@ def find_string_xrefs_multi(
     chunk_size: int = 2_000_000,
     max_scan_bytes: int = 8_000_000,
 ) -> Dict[int, List[Dict[str, Any]]]:
-    """Chunked Capstone pass over executable sections → xrefs for many string VAs."""
+    """Chunked Capstone pass + absolute imm/embedded-VA scan for string xrefs."""
     import capstone as cs
     from capstone.x86 import X86_REG_RIP
 
     want = {t: [] for t in targets if t}
     if not want or img.arch not in ("x86_64", "x86"):
         return want
+
+    # Fast path: embed little-endian VA bytes in executable sections (movabs / push / lea abs)
+    for sec in img.sections:
+        if not sec.executable or not sec.data:
+            continue
+        data = sec.data
+        for t in list(want.keys()):
+            if len(want[t]) >= max_per_target:
+                continue
+            # 64-bit and 32-bit encodings
+            needles = [t.to_bytes(8, "little")]
+            if t < 0x100000000:
+                needles.append(t.to_bytes(4, "little"))
+            for needle in needles:
+                start = 0
+                while len(want[t]) < max_per_target:
+                    idx = data.find(needle, start)
+                    if idx < 0:
+                        break
+                    # avoid matching inside unrelated data: prefer insn-aligned-ish
+                    addr = sec.addr + idx
+                    # walk back up to 15 bytes to find a disassembled insn that uses this imm
+                    hit_addr = addr
+                    want[t].append(
+                        {
+                            "addr": hex(hit_addr),
+                            "mnemonic": "imm_embed",
+                            "op_str": hex(t),
+                            "nearby_fn": _nearby_fn(img, hit_addr),
+                            "kind": "absolute",
+                        }
+                    )
+                    start = idx + 1
+
     mode = cs.CS_MODE_64 if img.bits == 64 else cs.CS_MODE_32
     md = cs.Cs(cs.CS_ARCH_X86, mode)
     md.detail = True
-    remaining = set(want)
+    remaining = {t for t, bucket in want.items() if len(bucket) < max_per_target}
     scanned = 0
     for sec in img.sections:
         if not remaining or scanned >= max_scan_bytes:
@@ -287,17 +321,18 @@ def find_string_xrefs_multi(
                         if op.type == cs.CS_OP_MEM and op.mem.base == X86_REG_RIP:
                             ea = insn.address + insn.size + op.mem.disp
                         elif op.type == cs.CS_OP_IMM and op.imm in remaining:
-                            ea = op.imm
+                            ea = int(op.imm)
                         if ea in remaining:
                             hit_t = ea
                             break
                     if hit_t is None:
                         continue
                     bucket = want[hit_t]
+                    # dedupe near same site
+                    if any(b.get("addr") == hex(insn.address) for b in bucket):
+                        continue
                     if len(bucket) >= max_per_target:
-                        if all(len(want[t]) >= max_per_target for t in remaining):
-                            remaining.clear()
-                            break
+                        remaining.discard(hit_t)
                         continue
                     bucket.append(
                         {
@@ -305,12 +340,11 @@ def find_string_xrefs_multi(
                             "mnemonic": insn.mnemonic,
                             "op_str": insn.op_str,
                             "nearby_fn": _nearby_fn(img, insn.address),
+                            "kind": "rip" if "rip" in (insn.op_str or "").lower() else "imm",
                         }
                     )
                     if len(bucket) >= max_per_target:
-                        if all(len(want[t]) >= max_per_target for t in list(remaining)):
-                            remaining.clear()
-                            break
+                        remaining.discard(hit_t)
             except Exception:
                 pass
             offset += take
@@ -329,12 +363,58 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
     mode = cs.CS_MODE_64 if img.bits == 64 else cs.CS_MODE_32
     md = cs.Cs(cs.CS_ARCH_X86, mode)
     md.detail = True
-    start = max(0, xref_addr - window)
-    data = img.read_bytes(start, window * 2 + 32)
+
+    # Clamp to recovered function bounds so we don't bleed across int3-separated stubs
+    lo = xref_addr - window
+    hi = xref_addr + window
+    try:
+        from argus.disasm.recovery import function_covering
+
+        bound = function_covering(img, xref_addr)
+        if bound and bound.end - bound.start < 0x8000:
+            lo = max(lo, bound.start)
+            hi = min(hi, bound.end)
+    except Exception:
+        pass
+    # Also don't cross int3 padding near xref
+    probe = img.read_bytes(max(0, xref_addr - window), window)
+    for i in range(len(probe) - 1, -1, -1):
+        if probe[i] == 0xCC:
+            # keep going through CC sled; stop at first non-CC after sled when walking back from xref
+            pass
+    # walk left from xref for CC run
+    left = img.read_bytes(xref_addr - min(window, 256), min(window, 256))
+    cut = 0
+    for i in range(len(left) - 1, -1, -1):
+        if left[i] == 0xCC:
+            cut = i + 1
+            # continue through sled
+            while i > 0 and left[i - 1] == 0xCC:
+                i -= 1
+                cut = i
+            break
+        if len(left) - i > 64:
+            break
+    if cut:
+        lo = max(lo, xref_addr - min(window, 256) + cut)
+
+    start = max(0, lo)
+    length = max(16, hi - start)
+    data = img.read_bytes(start, length + 32)
     if not data:
         return []
 
     insns = list(md.disasm(data, start))
+    # Drop instructions before last int3 before xref (same-block only)
+    filtered = []
+    for insn in insns:
+        if insn.address > xref_addr + window:
+            break
+        if insn.mnemonic in ("int3",) and insn.address < xref_addr:
+            filtered = []
+            continue
+        filtered.append(insn)
+    insns = filtered
     cands: List[Dict[str, Any]] = []
     for n, insn in enumerate(insns):
         m = insn.mnemonic
@@ -342,23 +422,53 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
         if not near:
             continue
         if m.startswith("j") and m not in ("jmp", "jecxz", "jrcxz"):
-            # Look backward for cmp/test/call — predicate vs ui_label_only
             ui_only = True
-            ret_guess = 0
+            ret_guess = 1
             reason = f"conditional near string xref@{hex(xref_addr)}"
             score = 40
+            saw_pred = False
+            saw_call = False
+            cmp_imm: Optional[int] = None
             for b in range(max(0, n - 8), n):
                 bm = insns[b].mnemonic
+                bo = insns[b].op_str or ""
                 if bm in ("cmp", "test", "and", "or", "xor", "sub", "add"):
-                    ui_only = False
-                    score += 35
+                    saw_pred = True
                     reason = f"jcc after {bm} near xref@{hex(xref_addr)}"
+                    if bm == "cmp":
+                        # parse trailing immediate: "eax, 1" / "rax, 0"
+                        try:
+                            if "," in bo:
+                                rhs = bo.split(",")[-1].strip()
+                                if rhs.startswith("0x"):
+                                    cmp_imm = int(rhs, 16)
+                                elif rhs.lstrip("-").isdigit():
+                                    cmp_imm = int(rhs)
+                        except ValueError:
+                            pass
                 if bm == "call":
-                    ui_only = False
-                    score += 45
+                    saw_call = True
                     reason = f"jcc after call near xref@{hex(xref_addr)}"
-                    ret_guess = 0
-            # lea of string alone right before jcc → UI label path
+            # Polarity: after cmp eax,1 / test al — jne usually means FAIL path
+            if m in ("je", "jz"):
+                if cmp_imm == 1:
+                    taken = True  # je success when == 1
+                else:
+                    taken = False  # je fail after test/cmp0
+            elif m in ("jne", "jnz"):
+                if cmp_imm == 1:
+                    taken = False  # jne fail when != 1
+                else:
+                    taken = True
+            else:
+                taken = True
+            if saw_pred or saw_call:
+                ui_only = False
+                score = 40 + (45 if saw_call else 0) + (35 if saw_pred else 0)
+                dist = abs(insn.address - xref_addr)
+                score += max(0, 20 - dist // 8)
+                if saw_call and cmp_imm == 1:
+                    score += 40  # call→cmp eax,1→jcc = real validator gate
             if ui_only:
                 score = 15
                 reason = f"ui_label_only: jcc near string xref@{hex(xref_addr)} without cmp/call"
@@ -367,27 +477,30 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
                     "kind": "force_branch",
                     "addr": hex(insn.address),
                     "mnemonic": f"{m} {insn.op_str}",
-                    "taken": True,
-                    "reason": reason,
+                    "taken": taken,
+                    "reason": reason + (f" (taken={taken})" if not ui_only else ""),
                     "nearby_fn": _nearby_fn(img, insn.address),
                     "score": score,
                     "ui_label_only": ui_only,
                     "ret_guess": ret_guess,
                 }
             )
-        if m == "call" and abs(insn.address - xref_addr) < 48:
-            # call immediately after loading license string — weak; call whose result is tested — stronger
+        if m == "call" and abs(insn.address - xref_addr) < 64:
             score = 25
             ui_only = True
             reason = f"call near string xref@{hex(xref_addr)}"
-            # if next few insns test eax/rax → gate-like
-            for a in range(n + 1, min(len(insns), n + 6)):
+            ret_guess = 0
+            for a in range(n + 1, min(len(insns), n + 8)):
                 am = insns[a].mnemonic
-                ao = insns[a].op_str
+                ao = insns[a].op_str or ""
                 if am in ("test", "cmp") and ("eax" in ao or "rax" in ao or "al" in ao):
                     score = 70
                     ui_only = False
+                    ret_guess = 1
                     reason = f"call then {am} ret near xref@{hex(xref_addr)}"
+                    if am == "cmp" and (", 1" in ao or ",1" in ao):
+                        score = 90
+                        reason = f"call then cmp==1 ret near xref@{hex(xref_addr)}"
                     break
             cands.append(
                 {
@@ -398,22 +511,34 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
                     "nearby_fn": _nearby_fn(img, insn.address),
                     "score": score,
                     "ui_label_only": ui_only,
-                    "ret_guess": 0,
-                    # for ret_imm we need call *target* — resolve imm if possible
+                    "ret_guess": ret_guess,
                     "call_target": _call_target(insn),
                 }
             )
-    # Prefer function entry ret_imm when we have a call target
     enriched = []
     for c in cands:
         if c.get("kind") == "ret_imm" and c.get("call_target"):
             ct = c["call_target"]
+            boost = 10
+            # Prefer stubbing large validators over tiny string parsers
+            try:
+                from argus.disasm.recovery import function_covering
+
+                bound = function_covering(img, ct)
+                if bound:
+                    sz = bound.end - bound.start
+                    if sz >= 0x400:
+                        boost = 55
+                    elif sz < 0x80:
+                        boost = -30  # likely parser/helper, not the gate
+            except Exception:
+                pass
             enriched.append(
                 {
                     **c,
                     "addr": hex(ct),
                     "reason": c["reason"] + f" → stub callee@{hex(ct)}",
-                    "score": c["score"] + 10,
+                    "score": int(c["score"]) + boost,
                 }
             )
         enriched.append(c)
@@ -565,8 +690,14 @@ def find_in_binary(
     scored.sort(key=lambda x: -x[0])
     hits = [h for _, h in scored[:limit]]
 
+    local_n = sum(1 for s in img.symbols.values() if s.is_function and not s.is_import and s.addr)
+    stripped = local_n < 40 and any(
+        (s.executable and s.data and len(s.data) >= 2_000_000) for s in img.sections
+    )
+
     gate_candidates: List[Dict[str, Any]] = []
     patch_candidates: List[Dict[str, Any]] = []
+    next_hint_slice: Optional[str] = None
     if with_xrefs:
         top = [h for h in hits if h["kind"] == "string" and h["score"] >= 80][:5]
         if not top:
@@ -585,10 +716,38 @@ def find_in_binary(
                 continue
             h["xrefs"] = xref_map.get(addr) or []
         gate_candidates = rank_gate_candidates(img, top, limit=12)
-        # patch_candidates = sorted gates (compat); demote ui_label_only to end
         patch_candidates = list(gate_candidates)
 
-    # unique by kind+addr already in rank_gate_candidates
+    # On stripped / license-ish queries, merge universal license_slice gates
+    qlow = (query or "").lower()
+    license_ish = any(
+        k in qlow
+        for k in ("license", "unlock", "register", "activat", "trial", "unregistered")
+    )
+    if with_xrefs and (stripped or license_ish):
+        try:
+            from argus.find_slice import license_slice
+
+            sliced = license_slice(path, query if license_ish else "invalid license", limit=12)
+            seen_g = {(g.get("kind"), g.get("addr")) for g in gate_candidates}
+            for g in sliced.get("gate_candidates") or []:
+                key = (g.get("kind"), g.get("addr"))
+                if key in seen_g:
+                    continue
+                seen_g.add(key)
+                gate_candidates.append(g)
+            gate_candidates.sort(
+                key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True))
+            )
+            gate_candidates = gate_candidates[:12]
+            patch_candidates = list(gate_candidates)
+            if sliced.get("next_hint") and any(
+                not g.get("ui_label_only") for g in gate_candidates
+            ):
+                next_hint_slice = sliced["next_hint"]
+        except Exception:
+            next_hint_slice = None
+
     uniq_p = patch_candidates[:12]
 
     next_hint = (
@@ -600,10 +759,6 @@ def find_in_binary(
         {"name": g["name"], "addr": g["addr"], "value": g["ret_value"]} for g in gate_symbols[:8]
     ]
     intent = _query_intent(query)
-    local_n = sum(1 for s in img.symbols.values() if s.is_function and not s.is_import and s.addr)
-    stripped = local_n < 40 and any(
-        (s.executable and s.data and len(s.data) >= 2_000_000) for s in img.sections
-    )
 
     if intent == "ui":
         top_str = [h for h in hits if h.get("kind") == "string"][:6]
@@ -645,14 +800,20 @@ def find_in_binary(
         top_g = gate_candidates[0]
         non_ui = [g for g in gate_candidates if not g.get("ui_label_only")]
         pick = non_ui[0] if non_ui else top_g
-        next_hint = (
-            f"gate_candidates ranked: prefer score>=40 and ui_label_only=false. "
-            f"Try argus_patch kind={pick.get('kind')} addr={pick.get('addr')} "
-            f"value={pick.get('ret_guess', 0)} — {pick.get('reason')}. "
-            f"If ui_label_only, do NOT claim unlock; try next candidate then re-find Unregistered."
-        )
+        if next_hint_slice and non_ui:
+            next_hint = next_hint_slice
+        else:
+            taken_bit = ""
+            if pick.get("kind") == "force_branch" and "taken" in pick:
+                taken_bit = f" taken={pick.get('taken')}"
+            next_hint = (
+                f"gate_candidates ranked: prefer score>=40 and ui_label_only=false. "
+                f"Try argus_patch kind={pick.get('kind')} addr={pick.get('addr')} "
+                f"value={pick.get('ret_guess', 1)}{taken_bit} — {pick.get('reason')}. "
+                f"If ui_label_only, do NOT claim unlock; try next candidate then re-find Unregistered."
+            )
         if stripped:
-            next_hint += " Stripped binary: no named Is* stubs; license-slice VA path only."
+            next_hint += " Stripped: prefer argus_slice then force_branch/ret_imm on non_ui gates."
     else:
         next_hint = (
             "no suggested_stubs and no gate_candidates; binary may be stripped — "
@@ -660,9 +821,8 @@ def find_in_binary(
         )
         if stripped:
             next_hint = (
-                "STRIPPED commercial-like binary: no gate_symbols, no CFF unflatten target. "
-                "Do not claim deobf/unlock success; only evidence-backed string patches or "
-                "VA-level work after xref analysis."
+                "STRIPPED commercial-like binary: call argus_slice then argus_unlock_apply. "
+                "Patch unlock_plan only; never claim unlock from UI strings alone."
             )
 
     return {

@@ -54,6 +54,7 @@ class Hint:
     want: Want
     function: Optional[str] = None
     entry: Optional[int] = None
+    query: Optional[str] = None  # string → xref → function for stripped lift
     patch_kind: Optional[PatchKind] = None
     find: Optional[bytes] = None  # success needle for solve; None = no default oracle
     output: Optional[str] = None
@@ -74,6 +75,7 @@ class Hint:
             "want": self.want.value,
             "function": self.function,
             "entry": hex(self.entry) if self.entry is not None else None,
+            "query": self.query,
             "patch_kind": self.patch_kind.value if self.patch_kind else None,
             "find": None if self.find is None else self.find.decode("latin1", errors="replace"),
             "output": self.output,
@@ -138,10 +140,25 @@ def _pick_function(img, hinted: Optional[str]) -> str:
     return "main"
 
 
+def _is_program_entry(img, addr: Optional[int], label: str) -> bool:
+    """True if patch target is process entry / main — early ret kills the app."""
+    if addr is None:
+        return label in _ENTRY_LABELS
+    if addr == img.entry:
+        return True
+    main = img.symbols.get("main")
+    if main and addr == main.addr:
+        return True
+    # Do not trust label alone: _pick_function defaults to "main" even when
+    # patch_addr is an unrelated VA (stripped binaries).
+    return False
+
+
 def _resolve_addr(img, fn: Optional[str], entry: Optional[int] = None) -> tuple[Optional[int], str]:
     """Resolve function name or hex VA to address."""
     if entry is not None:
-        return entry, fn or hex(entry)
+        # Explicit VA wins; label by address so entry-guards don't false-positive
+        return entry, hex(entry)
     if fn and fn in img.symbols:
         return img.symbols[fn].addr, fn
     if fn:
@@ -156,15 +173,14 @@ def _resolve_addr(img, fn: Optional[str], entry: Optional[int] = None) -> tuple[
 
 def _is_program_entry(img, addr: Optional[int], label: str) -> bool:
     """True if patch target is process entry / main — early ret kills the app."""
-    if label in _ENTRY_LABELS:
-        return True
     if addr is None:
-        return False
+        return label in _ENTRY_LABELS
     if addr == img.entry:
         return True
     main = img.symbols.get("main")
     if main and addr == main.addr:
         return True
+    # Ignore label alone: _pick_function defaults to "main" even for unrelated VAs.
     return False
 
 
@@ -200,144 +216,31 @@ def _pseudo_c_lift(
     fn: str,
     *,
     entry: Optional[int] = None,
+    query: Optional[str] = None,
     max_blocks: int = _MAX_LIFT_BLOCKS,
 ) -> tuple[str, dict]:
-    """Pseudo-C style lift after CFF adjacency cleanup (bounded for LLM context)."""
-    from argus.binary import load_binary
-    from argus.deobf.cff import cleaned_adjacency, recover_cff
-    from argus.disasm import build_cfg, build_function_cfg
+    """Pseudo-C style lift (annotated) — delegates to argus.lift."""
+    from argus.lift.pseudo import annotated_lift
 
-    img = load_binary(path)
-    if fn in img.symbols:
-        cfg = build_function_cfg(img, fn)
-        label = fn
-    else:
-        addr, label = _resolve_addr(img, fn, entry)
-        if addr is None:
-            raise KeyError(f"cannot resolve lift target {fn!r}")
-        cfg = build_cfg(img, entry=addr, function_name=label, max_blocks=max_blocks)
-    cff = recover_cff(cfg)
-    adj = cleaned_adjacency(cfg, cff)
-
-    callees: List[dict] = []
-    for baddr, blk in cfg.blocks.items():
-        for ins in blk.instructions:
-            if ins.mnemonic != "call":
-                continue
-            callees.append(
-                {
-                    "from": hex(baddr),
-                    "at": hex(ins.address),
-                    "to": ins.op_str,
-                    "targets": [hex(t) for t in (ins.targets or [])],
-                }
-            )
-            if len(callees) >= _MAX_CALLEES:
-                break
-        if len(callees) >= _MAX_CALLEES:
-            break
-
-    total_blocks = len(cfg.blocks)
-    block_addrs = sorted(cfg.blocks)[:max_blocks]
-    truncated = total_blocks > max_blocks
-
-    lines: List[str] = [
-        f"/* Argus lift: {label} @ {hex(cfg.entry)} */",
-        f"/* cff_cases={len(cff.case_map)} dispatcher="
-        f"{hex(cff.dispatcher) if cff.dispatcher else 'none'} */",
-        f"/* blocks={total_blocks} shown={len(block_addrs)} truncated={truncated} */",
-        f"int {label}(/* args */) {{",
-    ]
-    for addr in block_addrs:
-        blk = cfg.blocks[addr]
-        succs = adj.get(addr, list(blk.successors))
-        lines.append(f"  L_{addr:x}:")
-        for ins in blk.instructions[:20]:
-            m, o = ins.mnemonic, ins.op_str
-            if m == "ret":
-                lines.append("    return /* eax */;")
-            elif m in ("je", "jz") and succs:
-                t = succs[0] if len(succs) >= 1 else 0
-                f = succs[1] if len(succs) >= 2 else (addr + ins.size)
-                lines.append(f"    if (ZF) goto L_{t:x}; else goto L_{f:x}; /* {m} {o} */")
-            elif m in ("jne", "jnz") and succs:
-                t = succs[0] if succs else 0
-                lines.append(f"    if (!ZF) goto L_{t:x}; /* {m} {o} */")
-            elif m == "jmp" and succs:
-                lines.append(f"    goto L_{succs[0]:x};")
-            elif m == "call":
-                lines.append(f"    call({o});")
-            elif m.startswith("mov"):
-                lines.append(f"    {o.split(',')[0].strip()} = {','.join(o.split(',')[1:]).strip()}; /* mov */")
-            elif m == "cmp":
-                lines.append(f"    /* cmp {o} → ZF */")
-            else:
-                lines.append(f"    /* {m} {o} */")
-        if len(blk.instructions) > 20:
-            lines.append(f"    /* … {len(blk.instructions) - 20} more */")
-        for u, v in cff.recovered_edges:
-            if u == addr:
-                lines.append(f"    /* CFF edge → L_{v:x} */")
-        if len(succs) == 1 and blk.instructions and blk.instructions[-1].mnemonic not in (
-            "jmp", "ret", "je", "jz", "jne", "jnz",
-        ):
-            lines.append(f"    goto L_{succs[0]:x};")
-    if truncated:
-        lines.append(f"  /* … {total_blocks - max_blocks} blocks omitted */")
-    lines.append("}")
-    if cff.case_map:
-        lines.append("/* state machine cases */")
-        for imm, tgt in list(sorted(cff.case_map.items()))[:32]:
-            lines.append(f"/* case {hex(imm)} → L_{tgt:x} */")
-
-    known = label in img.symbols
-    if cff.case_map and known:
-        confidence = "high"
-    elif known and not truncated:
-        confidence = "medium"
-    else:
-        confidence = "low"
-
-    evidence = {
-        "cff": cff.to_dict(),
-        "blocks": total_blocks,
-        "shown_blocks": len(block_addrs),
-        "style": "pseudo_c",
-        "callees": callees,
-        "confidence": confidence,
-        "truncated": truncated,
-        "entry": hex(cfg.entry),
-        "function": label,
-    }
-    return "\n".join(lines), evidence
+    return annotated_lift(
+        path,
+        function=fn,
+        entry=entry,
+        query=query,
+        max_blocks=max_blocks,
+    )
 
 
-def _ir_blocks(path: str, fn: str) -> tuple[str, dict]:
-    from argus.binary import load_binary
-    from argus.deobf.cff import cleaned_adjacency, recover_cff
-    from argus.disasm import build_function_cfg
+def _ir_blocks(
+    path: str,
+    fn: str,
+    *,
+    entry: Optional[int] = None,
+    query: Optional[str] = None,
+) -> tuple[str, dict]:
+    from argus.lift.pseudo import annotated_ir
 
-    img = load_binary(path)
-    cfg = build_function_cfg(img, fn)
-    cff = recover_cff(cfg)
-    adj = cleaned_adjacency(cfg, cff)
-    blocks = []
-    for addr in sorted(cfg.blocks):
-        blk = cfg.blocks[addr]
-        blocks.append(
-            {
-                "addr": hex(addr),
-                "succs": [hex(s) for s in adj.get(addr, list(blk.successors))],
-                "insns": [{"m": i.mnemonic, "o": i.op_str, "a": hex(i.address)} for i in blk.instructions[:32]],
-            }
-        )
-    payload = {
-        "function": fn,
-        "entry": hex(cfg.entry),
-        "cff": cff.to_dict(),
-        "blocks": blocks,
-    }
-    return json.dumps(payload, indent=2), {"blocks": len(blocks), "cff_cases": len(cff.case_map)}
+    return annotated_ir(path, function=fn, entry=entry, query=query)
 
 
 def _encode_mov_eax_imm(imm: int) -> bytes:
@@ -632,21 +535,24 @@ def ask(path: str, hint: Hint) -> AskResult:
     notes.append(f"detect={prot.kind}")
     fn = _pick_function(img, hint.function)
     notes.append(f"function={fn}")
-    # Stripped: prefer explicit VA for lift/patch over bogus main/entry
+    # Stripped: resolve via entry / query / string note — never silent largest-main
     lift_entry = hint.entry if hint.entry is not None else hint.patch_addr
-    if prot.kind == "stripped" and hint.want in (Want.LIFT, Want.IR) and lift_entry is None and not hint.function:
-        try:
-            from argus.find import find_in_binary
+    lift_query = hint.query
+    if prot.kind == "stripped" and hint.want in (Want.LIFT, Want.IR) and lift_entry is None:
+        if not lift_query and hint.note and len(hint.note.strip()) >= 4:
+            # use note as free-form string query when it looks like text to find
+            if not any(x in hint.note.lower() for x in ("vmp", "flatten", "cff", "deobf")):
+                lift_query = hint.note.strip()[:80]
+                notes.append(f"stripped_lift_query={lift_query!r}")
+        if lift_entry is None and not hint.function and not lift_query:
+            try:
+                from argus.disasm.resolve import resolve_lift_target
 
-            found = find_in_binary(path, hint.note or "license", limit=12)
-            gates = found.get("gate_candidates") or []
-            non_ui = [g for g in gates if not g.get("ui_label_only")]
-            pick = (non_ui or gates or [None])[0]
-            if pick and pick.get("addr"):
-                lift_entry = int(pick["addr"], 0)
-                notes.append(f"stripped_lift_va={hex(lift_entry)} from gate_candidates")
-        except Exception as e:
-            notes.append(f"stripped_lift_pick_fail: {e}")
+                tgt = resolve_lift_target(img, entry=img.entry)
+                lift_entry = tgt.va
+                notes.append(f"stripped_lift_va={hex(lift_entry)} reason={tgt.reason}")
+            except Exception as e:
+                notes.append(f"stripped_lift_pick_fail: {e}")
 
     # VMP lift path
     if prot.kind in ("vmp", "themida", "mixed") and hint.want in (Want.LIFT, Want.IR, Want.REPORT):
@@ -702,7 +608,7 @@ def ask(path: str, hint: Hint) -> AskResult:
 
     if hint.want == Want.LIFT:
         try:
-            text, ev = _pseudo_c_lift(path, fn, entry=lift_entry)
+            text, ev = _pseudo_c_lift(path, fn, entry=lift_entry, query=lift_query)
         except Exception as e:
             notes.append(f"lift_fail: {e}")
             try:
@@ -733,11 +639,15 @@ def ask(path: str, hint: Hint) -> AskResult:
         )
 
     if hint.want == Want.IR:
-        text, ev = _ir_blocks(path, fn)
+        try:
+            text, ev = _ir_blocks(path, fn, entry=lift_entry, query=lift_query)
+        except Exception as e:
+            notes.append(f"ir_fail: {e}")
+            return AskResult(ok=False, want=hint.want.value, notes=notes)
         return AskResult(
             ok=True,
             want=hint.want.value,
-            answer=f"ir {fn} blocks={ev['blocks']}",
+            answer=f"ir {ev.get('function', fn)} blocks={ev.get('blocks')}",
             readable=text,
             evidence=ev,
             certificate={"proven": False},

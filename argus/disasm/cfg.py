@@ -75,6 +75,102 @@ _COND_JMP = {
 }
 
 
+_COND_JMP = {
+    "je", "jne", "jz", "jnz", "ja", "jae", "jb", "jbe", "jg", "jge", "jl", "jle",
+    "jo", "jno", "js", "jns", "jp", "jnp", "jcxz", "jecxz", "jrcxz",
+}
+
+
+def _resolve_jump_table_targets(
+    image: BinaryImage,
+    jmp_addr: int,
+    insn_cache: Dict[int, Instr],
+    md: cs.Cs,
+    *,
+    max_cases: int = 64,
+) -> List[int]:
+    """
+    Recover PIC switch targets: lea base,[rip+disp]; movsxd/mov idx,[base+reg*4];
+    add idx, base; jmp idx. Returns absolute code VAs.
+    """
+    # Walk back up to ~12 instructions looking for lea rip + scaled load + add
+    back: List[Instr] = []
+    # Prefer cached linear predecessors by scanning previous bytes
+    probe = jmp_addr
+    for _ in range(16):
+        # find previous insn start heuristically (1..15 bytes back)
+        found = None
+        for delta in range(1, 16):
+            a = probe - delta
+            if a in insn_cache:
+                found = insn_cache[a]
+                break
+            raw = image.read_bytes(a, 15)
+            try:
+                insns = list(md.disasm(raw, a))
+            except cs.CsError:
+                continue
+            if not insns:
+                continue
+            if insns[0].address + insns[0].size == probe:
+                mnemonic = insns[0].mnemonic.lower()
+                found = Instr(
+                    address=insns[0].address,
+                    size=insns[0].size,
+                    mnemonic=mnemonic,
+                    op_str=insns[0].op_str,
+                    bytes=bytes(insns[0].bytes),
+                )
+                insn_cache[a] = found
+                break
+        if not found:
+            break
+        back.append(found)
+        probe = found.address
+        if len(back) >= 12:
+            break
+
+    # Find lea with rip in recent insns
+    table_base = None
+    for ins in back:
+        if ins.mnemonic != "lea":
+            continue
+        if "rip" not in (ins.op_str or "").lower() and "eip" not in (ins.op_str or "").lower():
+            continue
+        # parse [rip ± disp]
+        import re
+
+        m = re.search(r"\[(?:rip|eip)\s*([+-])\s*(0x[0-9a-fA-F]+|\d+)\]", ins.op_str or "", re.I)
+        if not m:
+            continue
+        sign, imm = m.group(1), m.group(2)
+        disp = int(imm, 0)
+        if sign == "-":
+            disp = -disp
+        table_base = ins.address + ins.size + disp
+        break
+    if table_base is None:
+        return []
+
+    # Read relative offsets (int32) until they look invalid
+    targets: List[int] = []
+    for i in range(max_cases):
+        raw = image.read_bytes(table_base + i * 4, 4)
+        if len(raw) < 4:
+            break
+        rel = int.from_bytes(raw, "little", signed=True)
+        tgt = (table_base + rel) & ((1 << 64) - 1)
+        sec = image.section_at(tgt)
+        if not (sec and sec.executable):
+            # stop at first non-code; allow a couple zeros
+            if rel == 0 and i == 0:
+                continue
+            break
+        if tgt not in targets:
+            targets.append(tgt)
+    return targets[:max_cases]
+
+
 def _make_cs(arch: str) -> cs.Cs:
     if arch == "x86_64":
         md = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64)
@@ -186,7 +282,14 @@ def build_cfg(
                     leaders.add(t)
                     edges.add((addr, t))
                     work.append(t)
-            # indirect jmp: stop
+            # indirect jmp: try PIC jump-table recovery
+            if not instr.targets:
+                for t in _resolve_jump_table_targets(image, addr, insn_cache, md, max_cases=64):
+                    if executable(t):
+                        instr.targets.append(t)
+                        leaders.add(t)
+                        edges.add((addr, t))
+                        work.append(t)
             continue
         if instr.is_conditional:
             for t in instr.targets:
@@ -282,7 +385,11 @@ def build_cfg(
         if last.is_ret:
             continue
         if last.is_jmp:
-            for t in last.targets:
+            targets = list(last.targets)
+            if not targets:
+                targets = _resolve_jump_table_targets(image, last.address, insn_cache, md, max_cases=64)
+                last.targets.extend(targets)
+            for t in targets:
                 if t in blocks:
                     g.add_edge(addr, t)
                     blk.successors.append(t)

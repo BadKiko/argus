@@ -12,39 +12,18 @@ from argus.llm.tools import ARGUS_TOOLS, dispatch_tool
 SYSTEM = """You are Argus Agent — a reverse-engineering assistant backed by the Argus binary toolkit.
 
 Rules:
-- MUST use tools; never invent results. Answer from tool JSON only.
-- First classify the USER request:
-  A) UI / title / labels / “напиши текст” / days / infinity → STRING-ONLY workflow.
-  B) Unlock / bypass / always activated / убери проверку → GATE workflow.
-  C) Both → do B first, then A on the patched binary.
-
-STRING-ONLY (do NOT call ret_imm / suggested_stubs):
-  1) argus_find with queries for the exact phrases to change (title, “Running free version”,
-     “Days left:”, “Trial expired”, “PRO version”, theme filenames, etc.).
-  2) argus_patch kind=replace_string old=<exact hit> new=<replacement>.
-     new MUST be ≤ len(old) in bytes — pad with spaces if needed. Never invent longer slogans.
-     Never shorten theme/resource filenames (e.g. do not turn .sublime-theme into .subl).
-  3) Chain binary=.patched after each successful replace. If patch fails with Text file busy /
-     ETXTBSY: tell the user to quit the running app and retry — do not claim success.
-  4) Ignore suggested_stubs / gate_symbols for string-only prompts.
-
-GATE unlock (only if user asked to unlock/bypass):
-  1) argus_find query=license → follow suggested_stubs / next_hint when present.
-  2) If suggested_stubs/gate_symbols is EMPTY: use gate_candidates from find.
-     Prefer ui_label_only=false and higher score. force_branch near an “Unregistered”
-     UI string with ui_label_only=true is NOT unlock — try next candidate.
-     After each logic patch, read unlock_verify in the tool result; if still_locked_strings
-     non-empty, do NOT claim activation.
-     If still no viable gate, report incomplete — do NOT claim “лицензия успешно обойдена”.
-  3) ret_imm value=0 on Is/Check/Verify stubs, then value=1 on isActivated-style bools when listed.
-  4) Do NOT stub *Callback*/*Widget* from string xrefs alone.
-  5) After patches, trust unlock_verify / re-find — not wishful summary text.
-
-- GATE unlock: if find says stripped_like / empty suggested_stubs, say unlock is incomplete —
-  do not invent deobf success. Argus CFF unflatten needs recoverable functions; stripped
-  commercial apps are out of that path until VA/function recovery exists.
-- Never stub main/entry. Safety ok ≠ goals done.
-- Prefer argus_ai for passwords. Missing file → stop.
+- MUST use tools; never invent results.
+- The user message lists TASKS (free-form). Address EVERY task. Bind EVERY tool call with for_task=<id>.
+- Do not invent success. Runtime finalizes each task from tool evidence; your closing prose is ignored for status.
+- Prefer argus_find then argus_patch. For text changes: replace_string with exact old from hits; new ≤ len(old) bytes (pad spaces).
+- Never shorten resource filenames. Never stub main/entry.
+- Logic patches (force_branch/ret_imm) alone do NOT auto-complete a TASK — use argus_unlock_apply for unlock.
+- If ETXTBSY / Text file busy: stop claiming that task done; user must quit the app.
+- Missing file → stop.
+- Stripped: argus_lift with entry=0x… or query=\"exact string\" — do not claim CFF deobf success.
+- Unlock/license: (1) argus_slice (2) ONE argus_unlock_apply using unlock_plan steps (or omit steps to auto-apply).
+  Do not freestyle-patch parser gates outside unlock_plan. Honor taken=/value= from the plan.
+  Never claim GUI activation; done only when unlock_bytes verify.ok. rodata Unregistered may remain.
 """
 
 
@@ -56,6 +35,7 @@ class AgentResult:
     provider: str = "openai"
     tool_trace: List[Dict[str, Any]] = field(default_factory=list)
     raw_messages: List[Dict[str, Any]] = field(default_factory=list)
+    task_statuses: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +44,7 @@ class AgentResult:
             "steps": self.steps,
             "provider": self.provider,
             "tool_trace": self.tool_trace,
+            "task_statuses": self.task_statuses,
         }
 
 
@@ -73,7 +54,6 @@ def resolve_provider(provider: Optional[str] = None) -> str:
         return "gemini"
     if p in ("openai", "openai-compat", "compatible"):
         return "openai"
-    # auto: prefer gemini if GEMINI key set without openai url override intent
     if os.environ.get("ARGUS_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY"):
         return "gemini"
     return "openai"
@@ -89,6 +69,30 @@ def binary_missing(path: Optional[str]) -> bool:
     return not os.path.isfile(path)
 
 
+def _build_user_content(user_prompt: str, binary: Optional[str], tasks_block: str) -> str:
+    parts = [user_prompt.strip()]
+    if tasks_block:
+        parts.append("")
+        parts.append(tasks_block)
+    if binary:
+        parts.append("")
+        parts.append(f"Binary path: {binary}")
+    return "\n".join(parts)
+
+
+def _trace_append(trace: List[Dict[str, Any]], name: str, args: Dict[str, Any], result: str) -> None:
+    entry: Dict[str, Any] = {
+        "tool": name,
+        "args": args,
+        "result_preview": result[:2000],
+    }
+    try:
+        entry["result"] = json.loads(result)
+    except json.JSONDecodeError:
+        pass
+    trace.append(entry)
+
+
 def run_agent(
     user_prompt: str,
     binary: Optional[str] = None,
@@ -100,23 +104,48 @@ def run_agent(
     max_steps: int = 32,
     verbose: bool = False,
 ) -> AgentResult:
-    # Fail fast — do not call the LLM when the binary path is wrong
+    from argus.llm.tasks import finalize_agent, format_tasks_block, split_user_tasks
+
     if binary and binary_missing(binary):
         msg = missing_binary_message(binary)
         if verbose:
             print(msg, flush=True)
         return AgentResult(ok=False, answer=msg, steps=0, provider=resolve_provider(provider))
 
+    tasks = split_user_tasks(user_prompt)
+    tasks_block = format_tasks_block(tasks)
     prov = resolve_provider(provider)
     if prov == "gemini":
-        return _run_gemini(user_prompt, binary, key=key, model=model, url=url, max_steps=max_steps, verbose=verbose)
-    return _run_openai(user_prompt, binary, key=key, model=model, url=url, max_steps=max_steps, verbose=verbose)
+        return _run_gemini(
+            user_prompt,
+            binary,
+            tasks=tasks,
+            tasks_block=tasks_block,
+            key=key,
+            model=model,
+            url=url,
+            max_steps=max_steps,
+            verbose=verbose,
+        )
+    return _run_openai(
+        user_prompt,
+        binary,
+        tasks=tasks,
+        tasks_block=tasks_block,
+        key=key,
+        model=model,
+        url=url,
+        max_steps=max_steps,
+        verbose=verbose,
+    )
 
 
 def _run_openai(
     user_prompt: str,
     binary: Optional[str],
     *,
+    tasks,
+    tasks_block: str,
     key: Optional[str],
     model: Optional[str],
     url: Optional[str],
@@ -124,14 +153,12 @@ def _run_openai(
     verbose: bool,
 ) -> AgentResult:
     from argus.llm.client import LLMConfig, OpenAICompatClient
+    from argus.llm.tasks import finalize_agent, open_tasks_hint
 
     cfg = LLMConfig.from_env(url=url, key=key, model=model)
     client = OpenAICompatClient(cfg)
 
-    content = user_prompt
-    if binary:
-        content = f"{user_prompt}\n\nBinary path: {binary}"
-
+    content = _build_user_content(user_prompt, binary, tasks_block)
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": content},
@@ -147,8 +174,14 @@ def _run_openai(
         messages.append(assistant_msg)
 
         if not tool_calls:
-            answer = (text or "").strip() or "(empty model response)"
-            return AgentResult(ok=True, answer=answer, steps=step + 1, provider="openai", tool_trace=trace, raw_messages=messages)
+            return finalize_agent(
+                tasks,
+                trace,
+                text or "",
+                steps=step + 1,
+                provider="openai",
+                raw_messages=messages,
+            )
 
         for tc in tool_calls:
             fn = tc.get("function") or {}
@@ -161,7 +194,7 @@ def _run_openai(
             if binary and "binary" not in args:
                 args["binary"] = binary
             result = dispatch_tool(name, args)
-            trace.append({"tool": name, "args": args, "result_preview": result[:500]})
+            _trace_append(trace, name, args, result)
             if verbose:
                 print(f"[tool] {name}({json.dumps(args, ensure_ascii=False)[:120]})")
                 try:
@@ -178,12 +211,15 @@ def _run_openai(
                 }
             )
 
-    return AgentResult(
-        ok=False,
-        answer="max tool steps reached — try a narrower prompt",
+        hint = open_tasks_hint(tasks, trace)
+        messages.append({"role": "user", "content": hint})
+
+    return finalize_agent(
+        tasks,
+        trace,
+        "max tool steps reached",
         steps=max_steps,
         provider="openai",
-        tool_trace=trace,
         raw_messages=messages,
     )
 
@@ -192,6 +228,8 @@ def _run_gemini(
     user_prompt: str,
     binary: Optional[str],
     *,
+    tasks,
+    tasks_block: str,
     key: Optional[str],
     model: Optional[str],
     url: Optional[str],
@@ -199,10 +237,10 @@ def _run_gemini(
     verbose: bool,
 ) -> AgentResult:
     from argus.llm.gemini import GeminiClient, GeminiConfig
+    from argus.llm.tasks import finalize_agent, open_tasks_hint
 
     cfg = GeminiConfig.from_env(key=key, model=model, url=url)
     if cfg.model.startswith("gemini-3.7"):
-        # 3.7-flash often hangs with 0-byte responses on some keys/regions
         import sys
 
         print(
@@ -212,10 +250,7 @@ def _run_gemini(
         )
     client = GeminiClient(cfg)
 
-    text = user_prompt
-    if binary:
-        text = f"{user_prompt}\n\nBinary path: {binary}"
-
+    text = _build_user_content(user_prompt, binary, tasks_block)
     contents: List[Dict[str, Any]] = [{"role": "user", "parts": [{"text": text}]}]
     trace: List[Dict[str, Any]] = []
 
@@ -233,17 +268,15 @@ def _run_gemini(
             contents.append(model_content)
 
         if not calls:
-            answer = (out_text or "").strip() or "(empty model response)"
-            return AgentResult(
-                ok=True,
-                answer=answer,
+            return finalize_agent(
+                tasks,
+                trace,
+                out_text or "",
                 steps=step + 1,
                 provider="gemini",
-                tool_trace=trace,
                 raw_messages=contents,
             )
 
-        # Gemini: function responses go as a user turn with functionResponse parts
         fr_parts: List[Dict[str, Any]] = []
         for call in calls:
             name = call["name"]
@@ -253,7 +286,7 @@ def _run_gemini(
             if verbose:
                 print(f"[tool] {name}({json.dumps(args, ensure_ascii=False)[:120]})", flush=True)
             result = dispatch_tool(name, args)
-            trace.append({"tool": name, "args": args, "result_preview": result[:500]})
+            _trace_append(trace, name, args, result)
             try:
                 payload = json.loads(result)
             except json.JSONDecodeError:
@@ -269,12 +302,14 @@ def _run_gemini(
                 }
             )
         contents.append({"role": "user", "parts": fr_parts})
+        hint = open_tasks_hint(tasks, trace)
+        contents.append({"role": "user", "parts": [{"text": hint}]})
 
-    return AgentResult(
-        ok=False,
-        answer="max tool steps reached — try a narrower prompt",
+    return finalize_agent(
+        tasks,
+        trace,
+        "max tool steps reached",
         steps=max_steps,
         provider="gemini",
-        tool_trace=trace,
         raw_messages=contents,
     )
