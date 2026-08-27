@@ -27,11 +27,11 @@ _RULES: list[Tuple[re.Pattern, Want, Optional[PatchKind]]] = [
             r"обойд\w*\s*(лиценз|license|проверк)|bypass\s*(licen|check)|"
             r"disable\s*(licen|check)|патч\w*\s*(лиценз|проверк|license)|"
             r"убери\s*лиценз|nop\s*call|force\s*branch|ret_imm|nop_bytes|"
-            r"unlock_license|любой\s*ключ|сразу\s*актив)",
+            r"любой\s*ключ|сразу\s*актив|unlock)",
             re.I,
         ),
         Want.PATCH,
-        PatchKind.SKIP_CHECK,
+        PatchKind.RET_IMM,
     ),
     # Explicit UI string swap
     (
@@ -62,8 +62,8 @@ _RULES: list[Tuple[re.Pattern, Want, Optional[PatchKind]]] = [
 
 
 _FN_PATTERNS = [
-    re.compile(r"(?:функци[яи]|function|в)\s+[`'\"]?([A-Za-z_][A-Za-z0-9_]*)[`'\"]?", re.I),
-    re.compile(r"\b(authenticate|check_password|verify|target_function|main)\b", re.I),
+    re.compile(r"(?:функци[яи]|function|для|for|в)\s+[`'\"]?([A-Za-z_][A-Za-z0-9_]*)[`'\"]?", re.I),
+    re.compile(r"\b(main)\b", re.I),
 ]
 
 _ADDR_PAT = re.compile(r"(?:@|addr(?:ess)?\s*[:=]?\s*|по\s+адресу\s+)(0x[0-9a-fA-F]+|\d+)", re.I)
@@ -92,8 +92,8 @@ def parse_prompt(prompt: str, output: Optional[str] = None) -> Hint:
             patch_kind = PatchKind.RET_IMM
         elif re.search(r"always\s*true|всегда\s*true", text, re.I):
             patch_kind = PatchKind.ALWAYS_TRUE
-        elif re.search(r"unlock_license|любой\s*ключ|сразу\s*актив|IsLicenseGenuine", text, re.I):
-            patch_kind = PatchKind.UNLOCK_LICENSE
+        elif re.search(r"любой\s*ключ|сразу\s*актив|unlock\b|bypass\s*licen", text, re.I):
+            patch_kind = PatchKind.RET_IMM
         elif re.search(r"вместо\s*текст|replace_string|замен(и|ить)\s*строк", text, re.I):
             patch_kind = PatchKind.REPLACE_STRING
 
@@ -139,11 +139,22 @@ def parse_prompt(prompt: str, output: Optional[str] = None) -> Hint:
         patch_size = int(m.group(1))
 
     seed = parse_stdin_hint(text)
+    ret_value = 1
+    if patch_kind == PatchKind.RET_IMM and re.search(
+        r"любой\s*ключ|сразу\s*актив|unlock\b|bypass\s*licen|return\s*0|value\s*[=:]\s*0",
+        text,
+        re.I,
+    ):
+        ret_value = 0
+    find_needle = None
+    m_find = re.search(r"find\s*[:=]\s*[«\"'](.+?)[»\"']", text, re.I)
+    if m_find:
+        find_needle = m_find.group(1).encode("utf-8", errors="replace")
     return Hint(
         want=want,
         function=fn,
         patch_kind=patch_kind,
-        find=b"Welcome",
+        find=find_needle,
         output=output,
         note=text,
         stdin_seed=seed,
@@ -152,6 +163,7 @@ def parse_prompt(prompt: str, output: Optional[str] = None) -> Hint:
         patch_size=patch_size,
         old_string=old_string,
         new_string=new_string,
+        ret_value=ret_value,
     )
 
 

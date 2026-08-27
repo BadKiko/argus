@@ -34,12 +34,165 @@ DEFAULT_KEYWORDS = PHRASE_KEYWORDS + [
     "активац",
     "парол",
     "password",
-    "authenticate",
-    "check_password",
 ]
+
+# Soft gate-name filter — structural patterns only (not a vendor unlock recipe)
+# Prefix must be a CamelCase/API token (not "ise" inside Premise)
+_GATE_NAME_RE = re.compile(
+    r"(?:^|[^A-Za-z])(Is|Check|Verify|Validate|Has)"
+    r"(?=[A-Z0-9_])[A-Za-z0-9_]*"
+    r"(Licen[cs]e|Trial|Genuine|Activat)"
+)
+# Unmangled C-style API: IsLicenseGenuine, CheckTrial, …
+_GATE_SHORT_RE = re.compile(
+    r"^(Is|Check|Verify|Validate|Has)"
+    r"(?=([A-Z0-9_]))[A-Za-z0-9_]{0,48}"
+    r"(Licen[cs]e|Trial|Genuine|Valid|Activat)[A-Za-z0-9_]*$"
+)
+# Mangled C++ method leaf: …12isActivatedEv / …14isTrialValidEv (no product names)
+_GATE_MANGLED_BOOL_RE = re.compile(
+    r"_ZN\d+\w+\d+(isActivated|isActivatedOffline|isTrialValid|hasLicense|isLicensed)Ev$"
+)
+_GATE_NOISE_RE = re.compile(
+    r"(?i)(\.cold$|_ZTV|_ZTI|_ZTS|qt_meta|nlohmann|basic_json|TypeAndForceComplete|"
+    r"unordered_map|Invoker|thread11_State|zmq::|pipe_t|"
+    r"mbedtls|nghttp|blowfish|pubkey|openssl|gnutls|libsodium|sqlite)"
+)
+_GATE_UI_RE = re.compile(r"(?i)(Callback|Widget|Dialog|Button|clicked|editingFinished)")
+
+
+def _gate_score(name: str, is_function: bool) -> int:
+    """Higher = better license/auth gate candidate for ret_imm."""
+    if not name or _GATE_NOISE_RE.search(name):
+        return -1
+    if _GATE_UI_RE.search(name):
+        return -1
+    score = 0
+    if is_function:
+        score += 20
+    if _GATE_SHORT_RE.match(name):
+        score += 100
+        if re.search(r"(?i)(Genuine|Valid|Licen)", name):
+            score += 30
+    elif _GATE_NAME_RE.search(name) and not name.startswith("_Z"):
+        score += 60
+    elif _GATE_MANGLED_BOOL_RE.search(name):
+        score += 80
+    elif _GATE_NAME_RE.search(name):
+        score += 25
+    else:
+        return -1
+    # Get* rarely unlocks — demote (keep Is/Check/Verify/Validate / isActivated)
+    if re.match(r"(?i)^Get", name):
+        score -= 55
+    # Prefer short names; heavily demote huge mangled templates
+    score -= min(len(name) // 8, 40)
+    if name.startswith("_Z") and len(name) > 80:
+        score -= 50
+    return score
+
+
+def _suggested_ret_value(name: str) -> int:
+    """Heuristic only: Is/Check/Verify/Validate → 0 (OK); *isActivated*/Has* bool → 1."""
+    if _GATE_MANGLED_BOOL_RE.search(name):
+        return 1
+    if re.match(r"(?i)^Has", name):
+        return 1
+    if re.match(r"(?i)^(Is|Check|Verify|Validate)", name):
+        return 0
+    return 0
+
+
+def _query_intent(query: Optional[str]) -> str:
+    """Return 'ui' | 'unlock' | 'mixed' for next_hint tone (no vendor logic)."""
+    q = (query or "").lower()
+    unlock_kw = (
+        "unlock",
+        "bypass",
+        "ret_imm",
+        "stub",
+        "убери провер",
+        "отключ",
+        "всегда актив",
+        "skip check",
+        "force success",
+        "license check",
+        "проверк",
+    )
+    ui_kw = (
+        "title",
+        "заголов",
+        "текст",
+        "string",
+        "replace",
+        "days left",
+        "дней",
+        "бесконеч",
+        "надпис",
+        "label",
+        "heading",
+        "писало",
+        "напиши",
+        "infinity",
+        "∞",
+    )
+    wants_unlock = any(k in q for k in unlock_kw)
+    wants_ui = any(k in q for k in ui_kw)
+    if wants_unlock and wants_ui:
+        return "mixed"
+    if wants_unlock:
+        return "unlock"
+    if wants_ui:
+        return "ui"
+    if q and not any(k in q for k in ("license", "licence", "trial", "activat", "unlock")):
+        return "ui"
+    return "unlock" if any(k in q for k in ("license", "licence", "trial", "activat")) else "mixed"
+
+
+def _collect_gate_symbols(img, query: Optional[str] = None, limit: int = 16) -> List[Dict[str, Any]]:
+    """Rank structural license/auth gate symbols (no vendor name list)."""
+    del query  # reserved for future query-token boosts
+    scored: List[Tuple[int, Dict[str, Any]]] = []
+    for s in img.symbols.values():
+        if not s.name or s.is_import or not s.addr:
+            continue
+        sc = _gate_score(s.name, bool(s.is_function))
+        if sc < 50:
+            continue
+        item = {
+            "name": s.name,
+            "addr": hex(s.addr),
+            "score": sc,
+            "ret_value": _suggested_ret_value(s.name),
+        }
+        scored.append((sc, item))
+    scored.sort(key=lambda x: (-x[0], len(x[1]["name"])))
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for _, item in scored:
+        if item["name"] in seen:
+            continue
+        seen.add(item["name"])
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _nearby_fn(img, addr: int) -> Optional[str]:
+    """Prefer recovered function label; fall back to nearest named symbol."""
+    try:
+        from argus.disasm.recovery import function_covering
+
+        b = function_covering(img, addr)
+        if b:
+            # If a real symbol starts here, use its name
+            for s in img.symbols.values():
+                if s.is_function and not s.is_import and s.addr == b.start and s.name:
+                    return s.name
+            return b.name
+    except Exception:
+        pass
     best = None
     best_addr = -1
     for s in img.symbols.values():
@@ -98,8 +251,10 @@ def find_string_xrefs_multi(
     targets: List[int],
     *,
     max_per_target: int = 8,
+    chunk_size: int = 2_000_000,
+    max_scan_bytes: int = 8_000_000,
 ) -> Dict[int, List[Dict[str, Any]]]:
-    """One pass over executable sections → xrefs for many string VAs."""
+    """Chunked Capstone pass over executable sections → xrefs for many string VAs."""
     import capstone as cs
     from capstone.x86 import X86_REG_RIP
 
@@ -110,43 +265,56 @@ def find_string_xrefs_multi(
     md = cs.Cs(cs.CS_ARCH_X86, mode)
     md.detail = True
     remaining = set(want)
+    scanned = 0
     for sec in img.sections:
-        if not remaining:
+        if not remaining or scanned >= max_scan_bytes:
             break
-        if not sec.executable or not sec.data or len(sec.data) > 12_000_000:
+        if not sec.executable or not sec.data:
             continue
-        for insn in md.disasm(sec.data, sec.addr):
-            hit_t = None
-            for op in insn.operands:
-                ea = None
-                if op.type == cs.CS_OP_MEM and op.mem.base == X86_REG_RIP:
-                    ea = insn.address + insn.size + op.mem.disp
-                elif op.type == cs.CS_OP_IMM and op.imm in remaining:
-                    ea = op.imm
-                if ea in remaining:
-                    hit_t = ea
-                    break
-            if hit_t is None:
-                continue
-            bucket = want[hit_t]
-            if len(bucket) >= max_per_target:
-                if all(len(want[t]) >= max_per_target for t in remaining):
-                    remaining.clear()
-                    break
-                continue
-            bucket.append(
-                {
-                    "addr": hex(insn.address),
-                    "mnemonic": insn.mnemonic,
-                    "op_str": insn.op_str,
-                    "nearby_fn": _nearby_fn(img, insn.address),
-                }
-            )
-            if len(bucket) >= max_per_target:
-                # keep target in remaining until all filled; cheap check
-                if all(len(want[t]) >= max_per_target for t in list(remaining)):
-                    remaining.clear()
-                    break
+        data = sec.data
+        offset = 0
+        while offset < len(data) and remaining and scanned < max_scan_bytes:
+            take = min(chunk_size, max_scan_bytes - scanned, len(data) - offset)
+            chunk = data[offset : offset + take + 16]
+            base = sec.addr + offset
+            try:
+                for insn in md.disasm(chunk[:take], base):
+                    if not remaining:
+                        break
+                    hit_t = None
+                    for op in insn.operands:
+                        ea = None
+                        if op.type == cs.CS_OP_MEM and op.mem.base == X86_REG_RIP:
+                            ea = insn.address + insn.size + op.mem.disp
+                        elif op.type == cs.CS_OP_IMM and op.imm in remaining:
+                            ea = op.imm
+                        if ea in remaining:
+                            hit_t = ea
+                            break
+                    if hit_t is None:
+                        continue
+                    bucket = want[hit_t]
+                    if len(bucket) >= max_per_target:
+                        if all(len(want[t]) >= max_per_target for t in remaining):
+                            remaining.clear()
+                            break
+                        continue
+                    bucket.append(
+                        {
+                            "addr": hex(insn.address),
+                            "mnemonic": insn.mnemonic,
+                            "op_str": insn.op_str,
+                            "nearby_fn": _nearby_fn(img, insn.address),
+                        }
+                    )
+                    if len(bucket) >= max_per_target:
+                        if all(len(want[t]) >= max_per_target for t in list(remaining)):
+                            remaining.clear()
+                            break
+            except Exception:
+                pass
+            offset += take
+            scanned += take
     return want
 
 
@@ -155,47 +323,174 @@ def find_string_xrefs(img, target: int, *, max_hits: int = 24) -> List[Dict[str,
 
 
 def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str, Any]]:
-    """Heuristic patch sites: jcc near a string xref (license flag / branch)."""
+    """Heuristic patch sites: jcc/call near a string xref; score UI-only vs predicate."""
     import capstone as cs
 
     mode = cs.CS_MODE_64 if img.bits == 64 else cs.CS_MODE_32
     md = cs.Cs(cs.CS_ARCH_X86, mode)
-    start = xref_addr - window
-    if start < 0:
-        start = 0
-    data = img.read_bytes(start, window * 2 + 16)
+    md.detail = True
+    start = max(0, xref_addr - window)
+    data = img.read_bytes(start, window * 2 + 32)
+    if not data:
+        return []
+
+    insns = list(md.disasm(data, start))
     cands: List[Dict[str, Any]] = []
-    for insn in md.disasm(data, start):
+    for n, insn in enumerate(insns):
         m = insn.mnemonic
-        if m.startswith("j") and m not in ("jmp", "jecxz"):
+        near = abs(insn.address - xref_addr) <= window
+        if not near:
+            continue
+        if m.startswith("j") and m not in ("jmp", "jecxz", "jrcxz"):
+            # Look backward for cmp/test/call — predicate vs ui_label_only
+            ui_only = True
+            ret_guess = 0
+            reason = f"conditional near string xref@{hex(xref_addr)}"
+            score = 40
+            for b in range(max(0, n - 8), n):
+                bm = insns[b].mnemonic
+                if bm in ("cmp", "test", "and", "or", "xor", "sub", "add"):
+                    ui_only = False
+                    score += 35
+                    reason = f"jcc after {bm} near xref@{hex(xref_addr)}"
+                if bm == "call":
+                    ui_only = False
+                    score += 45
+                    reason = f"jcc after call near xref@{hex(xref_addr)}"
+                    ret_guess = 0
+            # lea of string alone right before jcc → UI label path
+            if ui_only:
+                score = 15
+                reason = f"ui_label_only: jcc near string xref@{hex(xref_addr)} without cmp/call"
             cands.append(
                 {
                     "kind": "force_branch",
                     "addr": hex(insn.address),
                     "mnemonic": f"{m} {insn.op_str}",
                     "taken": True,
-                    "reason": f"conditional near string xref@{hex(xref_addr)}",
+                    "reason": reason,
                     "nearby_fn": _nearby_fn(img, insn.address),
+                    "score": score,
+                    "ui_label_only": ui_only,
+                    "ret_guess": ret_guess,
                 }
             )
-        if m == "call" and abs(insn.address - xref_addr) < 40:
+        if m == "call" and abs(insn.address - xref_addr) < 48:
+            # call immediately after loading license string — weak; call whose result is tested — stronger
+            score = 25
+            ui_only = True
+            reason = f"call near string xref@{hex(xref_addr)}"
+            # if next few insns test eax/rax → gate-like
+            for a in range(n + 1, min(len(insns), n + 6)):
+                am = insns[a].mnemonic
+                ao = insns[a].op_str
+                if am in ("test", "cmp") and ("eax" in ao or "rax" in ao or "al" in ao):
+                    score = 70
+                    ui_only = False
+                    reason = f"call then {am} ret near xref@{hex(xref_addr)}"
+                    break
             cands.append(
                 {
-                    "kind": "nop_bytes",
+                    "kind": "ret_imm" if not ui_only else "nop_bytes",
                     "addr": hex(insn.address),
                     "size": insn.size,
-                    "reason": f"call near string xref@{hex(xref_addr)}",
+                    "reason": reason,
                     "nearby_fn": _nearby_fn(img, insn.address),
+                    "score": score,
+                    "ui_label_only": ui_only,
+                    "ret_guess": 0,
+                    # for ret_imm we need call *target* — resolve imm if possible
+                    "call_target": _call_target(insn),
                 }
             )
+    # Prefer function entry ret_imm when we have a call target
+    enriched = []
+    for c in cands:
+        if c.get("kind") == "ret_imm" and c.get("call_target"):
+            ct = c["call_target"]
+            enriched.append(
+                {
+                    **c,
+                    "addr": hex(ct),
+                    "reason": c["reason"] + f" → stub callee@{hex(ct)}",
+                    "score": c["score"] + 10,
+                }
+            )
+        enriched.append(c)
+
+    enriched.sort(key=lambda x: -int(x.get("score") or 0))
     seen = set()
     out = []
-    for c in cands:
-        if c["addr"] in seen:
+    for c in enriched:
+        key = (c["kind"], c["addr"])
+        if key in seen:
             continue
-        seen.add(c["addr"])
+        seen.add(key)
         out.append(c)
-        if len(out) >= 8:
+        if len(out) >= 10:
+            break
+    return out
+
+
+def _call_target(insn) -> Optional[int]:
+    try:
+        import capstone as cs
+
+        if not insn.operands:
+            return None
+        op = insn.operands[0]
+        if op.type == cs.CS_OP_IMM:
+            return int(op.imm)
+    except Exception:
+        return None
+    return None
+
+
+def rank_gate_candidates(
+    img,
+    string_hits: List[Dict[str, Any]],
+    *,
+    limit: int = 12,
+) -> List[Dict[str, Any]]:
+    """From top license string hits → ranked gate patch sites (no vendor names)."""
+    addrs: List[int] = []
+    for h in string_hits:
+        if h.get("kind") != "string":
+            continue
+        try:
+            addrs.append(int(h["addr"], 0))
+        except (TypeError, ValueError):
+            continue
+        if len(addrs) >= 5:
+            break
+    if not addrs:
+        return []
+    xref_map = find_string_xrefs_multi(img, addrs, max_per_target=6)
+    ranked: List[Dict[str, Any]] = []
+    for sa in addrs:
+        for xr in xref_map.get(sa) or []:
+            try:
+                xa = int(xr["addr"], 0)
+            except (TypeError, ValueError):
+                continue
+            for c in suggest_patches_near(img, xa):
+                ranked.append(
+                    {
+                        **c,
+                        "string_addr": hex(sa),
+                        "xref_addr": xr["addr"],
+                    }
+                )
+    ranked.sort(key=lambda x: (-int(x.get("score") or 0), x.get("ui_label_only", True)))
+    seen = set()
+    out = []
+    for c in ranked:
+        key = (c.get("kind"), c.get("addr"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+        if len(out) >= limit:
             break
     return out
 
@@ -270,12 +565,12 @@ def find_in_binary(
     scored.sort(key=lambda x: -x[0])
     hits = [h for _, h in scored[:limit]]
 
+    gate_candidates: List[Dict[str, Any]] = []
     patch_candidates: List[Dict[str, Any]] = []
     if with_xrefs:
-        # Only top-scoring strings — one .text pass for all of them
-        top = [h for h in hits if h["kind"] == "string" and h["score"] >= 80][:3]
+        top = [h for h in hits if h["kind"] == "string" and h["score"] >= 80][:5]
         if not top:
-            top = [h for h in hits if h["kind"] == "string"][:2]
+            top = [h for h in hits if h["kind"] == "string"][:3]
         addrs = []
         for h in top:
             try:
@@ -288,69 +583,112 @@ def find_in_binary(
                 addr = int(h["addr"], 0)
             except ValueError:
                 continue
-            xrefs = xref_map.get(addr) or []
-            h["xrefs"] = xrefs
-            for xr in xrefs[:3]:
-                try:
-                    xa = int(xr["addr"], 0)
-                except ValueError:
-                    continue
-                patch_candidates.extend(suggest_patches_near(img, xa))
+            h["xrefs"] = xref_map.get(addr) or []
+        gate_candidates = rank_gate_candidates(img, top, limit=12)
+        # patch_candidates = sorted gates (compat); demote ui_label_only to end
+        patch_candidates = list(gate_candidates)
 
-    # unique patch candidates
-    seen_p = set()
-    uniq_p = []
-    for c in patch_candidates:
-        if c["addr"] in seen_p:
-            continue
-        seen_p.add(c["addr"])
-        uniq_p.append(c)
-        if len(uniq_p) >= 12:
-            break
+    # unique by kind+addr already in rank_gate_candidates
+    uniq_p = patch_candidates[:12]
 
     next_hint = (
-        "use patch_candidates with argus_patch force_branch/nop_bytes; "
+        "use patch_candidates / gate_candidates with argus_patch on evidence VAs; "
         "never stub main/entry"
     )
-    lex_apis = [
-        n
-        for n in (
-            "IsLicenseGenuine",
-            "IsLicenseValid",
-            "IsTrialGenuine",
-            "IsLocalTrialGenuine",
-        )
-        if n in img.symbols
+    gate_symbols = _collect_gate_symbols(img, query, limit=16)
+    suggested_stubs = [
+        {"name": g["name"], "addr": g["addr"], "value": g["ret_value"]} for g in gate_symbols[:8]
     ]
-    if lex_apis:
+    intent = _query_intent(query)
+    local_n = sum(1 for s in img.symbols.values() if s.is_function and not s.is_import and s.addr)
+    stripped = local_n < 40 and any(
+        (s.executable and s.data and len(s.data) >= 2_000_000) for s in img.sections
+    )
+
+    if intent == "ui":
+        top_str = [h for h in hits if h.get("kind") == "string"][:6]
+        if top_str:
+            examples = [f"{h.get('preview')!r}@{h.get('addr')}" for h in top_str[:4]]
+            next_hint = (
+                "UI/text request: argus_patch kind=replace_string with exact old= from hits; "
+                "new MUST be ≤ len(old) bytes (pad with spaces). "
+                f"hits={examples}. Do NOT ret_imm / suggested_stubs for string-only prompts."
+            )
+        else:
+            next_hint = (
+                "UI/text request: argus_find with the exact phrase to change, then "
+                "replace_string (new ≤ old length). Do NOT ret_imm for titles/labels."
+            )
+    elif suggested_stubs:
+        names = [s["name"] for s in suggested_stubs[:6]]
+        addrs0 = [s["addr"] for s in suggested_stubs if int(s["value"]) == 0][:6]
+        addrs1 = [s["addr"] for s in suggested_stubs if int(s["value"]) == 1][:4]
+        parts = [
+            f"PREFERRED unlock path: stub ranked gate_symbols (not UI Callback/Widget from string xrefs). "
+            f"Top gates={names}."
+        ]
+        if addrs0:
+            parts.append(
+                f"argus_patch kind=ret_imm addrs={addrs0} value=0 "
+                f"(Is/Check/Verify/Validate OK-style)."
+            )
+        if addrs1:
+            parts.append(
+                f"Then chain binary=.patched kind=ret_imm addrs={addrs1} value=1 "
+                f"(bool isActivated/Has* style)."
+            )
+        parts.append("Do NOT ret_imm *Callback* / *Widget* alone — that usually leaves PRO locked.")
+        if intent == "mixed":
+            parts.append("After unlock, use replace_string for any UI text the user asked for.")
+        next_hint = " ".join(parts)
+    elif gate_candidates:
+        top_g = gate_candidates[0]
+        non_ui = [g for g in gate_candidates if not g.get("ui_label_only")]
+        pick = non_ui[0] if non_ui else top_g
         next_hint = (
-            f"LexActivator APIs found {lex_apis}: use argus_patch kind=unlock_license "
-            f"(returns LA_OK=0) to unlock PRO — string replaces alone do not unlock features"
+            f"gate_candidates ranked: prefer score>=40 and ui_label_only=false. "
+            f"Try argus_patch kind={pick.get('kind')} addr={pick.get('addr')} "
+            f"value={pick.get('ret_guess', 0)} — {pick.get('reason')}. "
+            f"If ui_label_only, do NOT claim unlock; try next candidate then re-find Unregistered."
         )
-    elif uniq_p:
+        if stripped:
+            next_hint += " Stripped binary: no named Is* stubs; license-slice VA path only."
+    else:
         next_hint = (
-            f"try argus_patch kind={uniq_p[0]['kind']} addr={uniq_p[0]['addr']} "
-            f"— then safety-check; on unsafe try next candidate"
+            "no suggested_stubs and no gate_candidates; binary may be stripped — "
+            "do not claim unlock; dig with more queries/xrefs/lift or report incomplete"
         )
+        if stripped:
+            next_hint = (
+                "STRIPPED commercial-like binary: no gate_symbols, no CFF unflatten target. "
+                "Do not claim deobf/unlock success; only evidence-backed string patches or "
+                "VA-level work after xref analysis."
+            )
 
     return {
         "ok": True,
         "summary": (
-            f"find hits={len(hits)} patch_candidates={len(uniq_p)}"
-            + (f" lex_apis={len(lex_apis)}" if lex_apis else "")
+            f"find hits={len(hits)} gate_candidates={len(gate_candidates)}"
+            + (f" gate_symbols={len(gate_symbols)}" if gate_symbols else "")
+            + (f" stripped_hint={stripped}" if stripped else "")
         ),
         "evidence": {
             "hits": hits,
             "patch_candidates": uniq_p,
-            "license_apis": [
-                {"name": n, "addr": hex(img.symbols[n].addr)} for n in lex_apis
-            ],
+            "gate_candidates": gate_candidates,
+            "gate_symbols": gate_symbols,
+            "suggested_stubs": suggested_stubs,
+            "stripped_like": stripped,
+            "local_funcs": local_n,
             "entry": hex(img.entry),
             "fmt": img.fmt,
         },
         "hits": hits,
         "patch_candidates": uniq_p,
-        "license_apis": lex_apis,
+        "gate_candidates": gate_candidates,
+        "gate_symbols": gate_symbols,
+        "suggested_stubs": suggested_stubs,
+        "stripped_like": stripped,
         "limits": {"limit": limit, "returned": len(hits)},
         "next_hint": next_hint,
     }

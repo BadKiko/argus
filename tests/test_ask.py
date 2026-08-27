@@ -20,14 +20,22 @@ def _need(*parts: str) -> Path:
 
 
 def test_ask_password_fauxware():
-    r = ask(str(_need("fauxware")), Hint(want=Want.PASSWORD, note="crackme backdoor password"))
+    r = ask(
+        str(_need("fauxware")),
+        Hint(want=Want.PASSWORD, note="crackme backdoor password", find=b"Welcome"),
+    )
     assert r.ok and r.answer and "SOSNEAKY" in r.answer
 
 
 def test_ask_password_fauxware_fla():
     r = ask(
         str(_need("fauxware_fla")),
-        Hint(want=Want.PASSWORD, note="OLLVM flattened; need password"),
+        Hint(
+            want=Want.PASSWORD,
+            note="OLLVM flattened; need password",
+            find=b"Welcome",
+            function="authenticate",
+        ),
     )
     assert r.ok and r.answer == "SOSNEAKY"
 

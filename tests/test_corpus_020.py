@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from argus import __version__, ai
+from argus import __version__
 from argus.ask import Hint, PatchKind, Want, ask
+from argus.nl import ai
 from argus.binary import load_binary
 from argus.deobf import detect_protection, recover_cff, vmp_partial_lift
 from argus.deobf.unflatten import apply_unflatten
@@ -30,8 +31,17 @@ def test_version_020():
 
 @pytest.mark.ask
 def test_ai_password_plain_and_fla():
-    assert ai(str(_need("fauxware")), "дай пароль").answer == "SOSNEAKY"
-    assert ai(str(_need("fauxware_fla")), "дай пароль для админа").answer == "SOSNEAKY"
+    # explicit find oracle for sample crackmes (no production Welcome default)
+    assert (
+        ask(str(_need("fauxware")), Hint(want=Want.PASSWORD, find=b"Welcome")).answer == "SOSNEAKY"
+    )
+    assert (
+        ask(
+            str(_need("fauxware_fla")),
+            Hint(want=Want.PASSWORD, find=b"Welcome", function="authenticate", note="cff"),
+        ).answer
+        == "SOSNEAKY"
+    )
 
 
 @pytest.mark.ask

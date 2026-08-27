@@ -40,6 +40,7 @@ class Explorer:
         avoid: Optional[Set[int]] = None,
         stdin_len: int = 24,
         entry: Optional[int] = None,
+        find_needle: Optional[bytes] = None,
     ) -> SolveResult:
         avoid = avoid or set()
         initial = self.engine.make_entry_state(entry=entry, stdin_len=stdin_len)
@@ -59,7 +60,7 @@ class Explorer:
             explored += 1
             if state.ip in avoid or (state.exited and state.exit_code != 0):
                 continue
-            if state.ip == target or (state.stdout and b"Welcome" in state.stdout):
+            if state.ip == target or (find_needle and find_needle in state.stdout):
                 ok, model, raw = self._sat(state)
                 if ok:
                     return SolveResult(True, raw, state.stdout, model, explored, "target reached")
@@ -77,7 +78,7 @@ class Explorer:
                 else:
                     symbolic_q.append(s)
 
-            if state.ip == target or (state.stdout and b"Welcome" in state.stdout):
+            if state.ip == target or (find_needle and find_needle in state.stdout):
                 ok, model, raw = self._sat(state)
                 if ok:
                     return SolveResult(True, raw, state.stdout, model, explored, "target reached")
@@ -146,7 +147,7 @@ class Explorer:
         return True, assignments, bytes(raw)
 
 
-def solve_binary(path: str, find: bytes = b"Welcome") -> SolveResult:
+def solve_binary(path: str, find: Optional[bytes] = None) -> SolveResult:
     from argus.binary import load_binary
 
     image = load_binary(path)
@@ -162,5 +163,11 @@ def solve_binary(path: str, find: bytes = b"Welcome") -> SolveResult:
         avoid = set()
         if "rejected" in image.symbols:
             avoid.add(image.symbols["rejected"].addr)
-        return ex.solve_to_address(image.symbols["accepted"].addr, avoid=avoid)
+        return ex.solve_to_address(
+            image.symbols["accepted"].addr, avoid=avoid, find_needle=find
+        )
+    if not find:
+        return SolveResult(
+            False, None, b"", None, 0, "find needle required (no hardcoded success string)"
+        )
     return ex.solve_find_string(find)

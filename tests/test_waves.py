@@ -53,7 +53,7 @@ def test_wave1_unflatten_patch_authenticate():
 
 
 def test_wave1_solve_after_deobf_fauxware_fla():
-    res = solve_after_deobf(str(_need("fauxware_fla")))
+    res = solve_after_deobf(str(_need("fauxware_fla")), function="authenticate", find=b"Welcome")
     assert res.success
     assert res.stdin and b"SOSNEAKY" in res.stdin
 

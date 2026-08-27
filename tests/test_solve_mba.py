@@ -7,7 +7,7 @@ SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 
 
 def test_solve_fauxware_password():
-    res = solve_binary(str(SAMPLES / "fauxware"))
+    res = solve_binary(str(SAMPLES / "fauxware"), find=b"Welcome")
     assert res.success, res.message
     assert res.stdin is not None
     # Password SOSNEAKY appears in the stdin stream (after username field)

@@ -47,9 +47,9 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_find",
-        "Find license/auth strings and return ranked hits PLUS patch_candidates "
-        "(force_branch/nop_bytes addrs near string xrefs). "
-        "After a refused main stub, call this then argus_patch using a candidate addr — do not stop.",
+        "Find license/auth strings and return ranked hits, gate_candidates (scored VA patches), "
+        "gate_symbols/suggested_stubs when named. For unlock: prefer suggested_stubs; else "
+        "gate_candidates with ui_label_only=false. Re-find after patch; never claim unlock on UI-only.",
         {
             "binary": {"type": "string"},
             "query": {"type": "string", "description": "Extra keywords / phrase e.g. 'free version'"},
@@ -67,10 +67,11 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_solve",
-        "Symbolic/concolic crackme solve. Use deobf=true for OLLVM flattened binaries.",
+        "Symbolic/concolic crackme solve. Pass find= success stdout needle. Use deobf=true for OLLVM flattened binaries.",
         {
             "binary": {"type": "string"},
             "deobf": {"type": "boolean", "description": "Unflatten CFF before solve"},
+            "find": {"type": "string", "description": "Success needle in stdout (required unless binary has accepted symbol)"},
         },
         ["binary"],
     ),
@@ -96,12 +97,12 @@ ARGUS_TOOLS: List[dict] = [
     openai_tool(
         "argus_patch",
         "Write a patched binary WITHOUT breaking app startup. "
-        "For PRO/license unlock on LexActivator apps: kind=unlock_license FIRST "
-        "(stubs IsLicenseGenuine/IsLicenseValid/IsTrial* to return 0=LA_OK). "
-        "replace_string only changes UI text — it does NOT unlock features. "
-        "Also: force_branch, nop_bytes, skip_check, replace_string, ret_imm. "
-        "Chain: binary=./file.patched for follow-up patches. "
-        "Do NOT claim unlock success after only string replaces.",
+        "For license unlock: use argus_find suggested_stubs OR gate_candidates "
+        "(prefer ui_label_only=false, higher score). kind=ret_imm/force_branch/nop_bytes. "
+        "After patch, call argus_find again for Unregistered — if still primary and only "
+        "ui_label_only was patched, unlock is incomplete. "
+        "Do not ret_imm UI *Callback*/*Widget* alone. replace_string only changes UI text. "
+        "If error Text file busy / ETXTBSY: quit the running app and retry. Never stub main/entry.",
         {
             "binary": {"type": "string"},
             "kind": {
@@ -116,16 +117,26 @@ ARGUS_TOOLS: List[dict] = [
                     "nop_bytes",
                     "ret_imm",
                     "replace_string",
-                    "unlock_license",
                 ],
             },
             "function": {"type": "string", "description": "Symbol name or 0x VA (not main for stubs)"},
             "addr": {"type": "string", "description": "VA for force_branch / nop_bytes / ret_imm"},
+            "addrs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Multi-target VAs for ret_imm (from suggested_stubs)",
+            },
             "size": {"type": "integer", "description": "Byte length for nop_bytes (default 5)"},
             "taken": {"type": "boolean", "description": "force_branch: take branch if true"},
-            "value": {"type": "integer", "description": "ret_imm return value (default 1; LexActivator LA_OK=0)"},
-            "old": {"type": "string", "description": "replace_string: existing substring to find"},
-            "new": {"type": "string", "description": "replace_string: replacement (must fit in old slot)"},
+            "value": {"type": "integer", "description": "ret_imm return value (0=OK-style gate, 1=bool true)"},
+            "old": {
+                "type": "string",
+                "description": "replace_string: exact existing substring from argus_find hits",
+            },
+            "new": {
+                "type": "string",
+                "description": "replacement; MUST be ≤ len(old) UTF-8 bytes — pad with spaces, never longer",
+            },
             "output": {"type": "string"},
         },
         ["binary", "kind"],
@@ -332,7 +343,36 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         if name == "argus_find":
             from argus.find import find_in_binary
 
-            return _truncate(find_in_binary(arguments["binary"], arguments.get("query")))
+            found = find_in_binary(arguments["binary"], arguments.get("query"))
+            # Put unlock guidance first — full hits often truncate past gate_symbols
+            slim = {
+                "ok": found.get("ok", True),
+                "summary": found.get("summary"),
+                "next_hint": found.get("next_hint"),
+                "suggested_stubs": found.get("suggested_stubs") or [],
+                "gate_symbols": (found.get("gate_symbols") or [])[:12],
+                "gate_candidates": (found.get("gate_candidates") or [])[:10],
+                "patch_candidates": (found.get("patch_candidates") or [])[:8],
+                "stripped_like": found.get("stripped_like"),
+                "hits": [
+                    {k: h.get(k) for k in ("addr", "kind", "preview", "score", "nearby_fn")}
+                    for h in (found.get("hits") or [])[:10]
+                ],
+                "evidence": {
+                    "suggested_stubs": found.get("suggested_stubs") or [],
+                    "gate_symbols": (found.get("gate_symbols") or [])[:12],
+                    "gate_candidates": (found.get("gate_candidates") or [])[:10],
+                    "patch_candidates": (found.get("patch_candidates") or [])[:8],
+                    "stripped_like": found.get("stripped_like"),
+                    "hits": [
+                        {k: h.get(k) for k in ("addr", "kind", "preview", "score")}
+                        for h in (found.get("hits") or [])[:8]
+                    ],
+                    "entry": (found.get("evidence") or {}).get("entry"),
+                    "fmt": (found.get("evidence") or {}).get("fmt"),
+                },
+            }
+            return _truncate(slim, limit=14000)
 
         if name == "argus_xrefs":
             from argus.binary import load_binary
@@ -364,10 +404,12 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             from argus.symbolic import solve_binary
 
             path = arguments["binary"]
+            find_s = arguments.get("find")
+            find_b = find_s.encode("utf-8", errors="replace") if find_s else None
             if arguments.get("deobf"):
-                res = solve_after_deobf(path)
+                res = solve_after_deobf(path, find=find_b)
             else:
-                res = solve_binary(path)
+                res = solve_binary(path, find=find_b)
             stdin = None if res.stdin is None else res.stdin.decode("latin1", errors="replace")
             return _envelope(
                 ok=bool(res.success),
@@ -392,10 +434,8 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             path = arguments["binary"]
             fn = arguments.get("function") or "main"
             img = load_binary(path)
-            if fn not in img.symbols:
-                fn = "authenticate" if "authenticate" in img.symbols else (
-                    "target_function" if "target_function" in img.symbols else fn
-                )
+            if fn not in img.symbols and "main" in img.symbols:
+                fn = "main"
             if arguments.get("patch"):
                 result = deobf_and_patch(path, fn, arguments["patch"])
                 d = result.to_dict()
@@ -425,6 +465,13 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             kind = PatchKind(arguments["kind"])
             addr = _parse_addr(arguments.get("addr"))
             out = arguments.get("output") or (arguments["binary"] + ".patched")
+            stub_addrs = None
+            if arguments.get("addrs"):
+                stub_addrs = []
+                for a in arguments["addrs"]:
+                    pa = _parse_addr(a) if not isinstance(a, int) else int(a)
+                    if pa is not None:
+                        stub_addrs.append(pa)
             r = ask(
                 arguments["binary"],
                 Hint(
@@ -440,9 +487,56 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                     ret_value=int(arguments.get("value", 1)),
                     old_string=arguments.get("old") or arguments.get("old_string"),
                     new_string=arguments.get("new") if "new" in arguments else arguments.get("new_string"),
+                    stub_addrs=stub_addrs,
                 ),
             )
             env = _ask_to_envelope(r)
+            # Static unlock verify hint for agent
+            if r.ok and r.patched_path and kind.value in (
+                "ret_imm",
+                "force_branch",
+                "skip_check",
+                "nop_bytes",
+                "always_true",
+            ):
+                try:
+                    from argus.find import find_in_binary
+                    import json as _json
+
+                    prev = _json.loads(env) if isinstance(env, str) else {}
+                    vf = find_in_binary(
+                        r.patched_path,
+                        "Unregistered unregistered Buy License",
+                        limit=12,
+                        with_xrefs=False,
+                    )
+                    still = [
+                        h.get("preview")
+                        for h in (vf.get("hits") or [])
+                        if h.get("kind") == "string"
+                        and any(
+                            x in (h.get("preview") or "").lower()
+                            for x in ("unregistered", "buy license")
+                        )
+                    ][:5]
+                    note = (
+                        "unlock_verify: Unregistered/Buy License strings still present — "
+                        "do NOT claim full activation; try next gate_candidate"
+                        if still
+                        else "unlock_verify: no Unregistered/Buy License string hits (weak positive)"
+                    )
+                    return _envelope(
+                        ok=bool(r.ok),
+                        summary=str(prev.get("summary") or r.answer or ""),
+                        evidence={
+                            **(prev.get("evidence") or {}),
+                            "unlock_verify": {"still_locked_strings": still, "note": note},
+                        },
+                        next_hint=note if still else (prev.get("next_hint") or ""),
+                        patched_path=r.patched_path,
+                    )
+                except Exception:
+                    pass
             return env
 
         if name == "argus_cfg":
@@ -465,5 +559,17 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             return _envelope(ok=True, summary=f"cfg blocks={ev['blocks']}", evidence=ev, **ev)
 
         return _envelope(ok=False, summary=f"unknown tool {name}", evidence={"error": f"unknown tool {name}"})
+    except OSError as e:
+        err = str(e)
+        if e.errno == 26 or "Text file busy" in err or "ETXTBSY" in err:
+            return _envelope(
+                ok=False,
+                summary="Text file busy (ETXTBSY): target binary is running — quit the app, then retry patch",
+                evidence={"error": err, "errno": getattr(e, "errno", None)},
+                next_hint="close the running program and patch again",
+                error=err,
+                tool=name,
+            )
+        return _envelope(ok=False, summary=err, evidence={"error": err, "tool": name}, error=err, tool=name)
     except Exception as e:
         return _envelope(ok=False, summary=str(e), evidence={"error": str(e), "tool": name}, error=str(e), tool=name)

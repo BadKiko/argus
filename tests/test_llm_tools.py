@@ -20,6 +20,7 @@ def test_tools_schema_nonempty():
 
 def test_dispatch_argus_ai_password():
     path = str(SAMPLES / "fauxware")
+    # fauxware has `accepted` symbol — solve works without hardcoded Welcome default
     out = dispatch_tool("argus_ai", {"prompt": "дай пароль", "binary": path})
     data = json.loads(out)
     assert data.get("ok") is True

@@ -106,13 +106,31 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
 def cmd_deobf(args: argparse.Namespace) -> int:
     from argus.binary import load_binary
-    from argus.deobf import deobf_and_patch, recover_cff
-    from argus.disasm import build_function_cfg
+    from argus.deobf import deobf_and_patch, detect_protection, recover_cff
+    from argus.disasm import build_cfg, build_function_cfg
     from argus.eval import ArgusReport
 
     img = load_binary(args.binary)
-    fn = args.function or "main"
-    cfg = build_function_cfg(img, fn)
+    prot = detect_protection(img)
+    console.print(f"detect={prot.kind} conf={prot.confidence:.2f}")
+    if prot.kind == "stripped":
+        console.print(
+            "[yellow]stripped binary[/yellow]: CFF unflatten needs a recoverable function; "
+            "use --entry 0xVA for CFG probe or argus find → gate_candidates"
+        )
+
+    if args.entry:
+        entry = int(args.entry, 0)
+        cfg = build_cfg(img, entry=entry, max_blocks=400)
+        fn = f"sub_{entry:x}"
+    else:
+        fn = args.function or "main"
+        if fn in img.symbols:
+            cfg = build_function_cfg(img, fn)
+        else:
+            cfg = build_cfg(img, entry=img.entry, max_blocks=400)
+            fn = fn if fn != "main" else f"entry_{img.entry:x}"
+
     report = recover_cff(cfg)
     console.print(f"dispatcher={hex(report.dispatcher) if report.dispatcher else None}")
     console.print(f"state_slot={report.state_slot!r}", markup=False)
@@ -122,14 +140,18 @@ def cmd_deobf(args: argparse.Namespace) -> int:
     for imm, tgt in list(report.case_map.items())[:12]:
         console.print(f"  case {hex(imm)} -> {hex(tgt)}")
 
+    if not report.dispatcher and prot.kind == "stripped":
+        console.print("[yellow]no CFF dispatcher — skip patch; use license-slice / gate_candidates[/yellow]")
+        return 1
+
     patch_info = None
     if args.patch:
+        if args.entry:
+            console.print("[yellow]--patch with --entry: use named -f for unflatten write[/yellow]")
+            return 1
         fns = [fn]
-        if args.all_cff:
-            # also patch main/authenticate companions
-            for extra in ("main", "authenticate", "target_function"):
-                if extra in img.symbols and extra not in fns:
-                    fns.append(extra)
+        if args.all_cff and args.function:
+            pass
         result = deobf_and_patch(
             args.binary,
             fns,
@@ -152,9 +174,10 @@ def cmd_deobf(args: argparse.Namespace) -> int:
             fmt=img.fmt,
             entry=hex(img.entry),
             functions=[fn],
-            cff=report.to_dict(),
+            cff=report.to_dict() if hasattr(report, "to_dict") else {},
             patches=[patch_info] if patch_info else [],
-            patch_certificate=patch_info.get("certificate") if patch_info else None,
+            patch_certificate=(patch_info or {}).get("certificate") if patch_info else None,
+            notes=[f"detect={prot.kind}"],
         )
         Path(args.json).write_text(rep.to_json())
         console.print(f"wrote {args.json}")
@@ -400,7 +423,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
             key=args.key,
             model=model,
             max_steps=args.max_steps,
-            verbose=args.verbose,
+            verbose=bool(args.verbose) and not bool(getattr(args, "quiet", False)),
         )
     except Exception as e:
         console.print(f"agent error: {e}")
@@ -409,7 +432,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
         console.print(f"wrote {args.json}")
-    if args.verbose:
+    if bool(args.verbose) and not bool(getattr(args, "quiet", False)):
         for t in res.tool_trace:
             console.print(f"  tool {t['tool']} -> {t['result_preview'][:160]!r}")
     return 0 if res.ok else 1
@@ -428,7 +451,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         function=args.function,
         entry=int(args.entry, 0) if args.entry else None,
         patch_kind=patch_kind,
-        find=args.find.encode() if args.find else b"Welcome",
+        find=args.find.encode() if args.find else None,
         output=args.output,
         note=args.hint or "",
         force_taken=not args.force_not_taken,
@@ -547,10 +570,11 @@ def build_parser() -> argparse.ArgumentParser:
     d = sp.add_parser("deobf", help="CFF state-variable recovery + optional patch")
     d.add_argument("binary")
     d.add_argument("-f", "--function", default="main")
+    d.add_argument("--entry", help="VA for CFG/CFF probe on stripped binaries (hex/dec)")
     d.add_argument("--patch", help="Write unflattened binary")
     d.add_argument("--verify", action="store_true", help="Run patched ELF smoke verify")
     d.add_argument("--stdin", default="", help="stdin for verify")
-    d.add_argument("--all-cff", action="store_true", help="Also unflatten main/authenticate if present")
+    d.add_argument("--all-cff", action="store_true", help="Also unflatten companion functions from -f list")
     d.add_argument("--json", help="Write report JSON")
     d.set_defaults(func=cmd_deobf)
 
@@ -610,10 +634,20 @@ def build_parser() -> argparse.ArgumentParser:
     ask_p.add_argument("--hint", default="", help="Free-text hint from the LLM")
     ask_p.add_argument(
         "--patch-kind",
-        choices=["always_true", "always_false", "unflatten", "nop_prompts", "force_branch", "skip_check"],
+        choices=[
+            "always_true",
+            "always_false",
+            "unflatten",
+            "nop_prompts",
+            "force_branch",
+            "skip_check",
+            "nop_bytes",
+            "ret_imm",
+            "replace_string",
+        ],
     )
     ask_p.add_argument("-o", "--output", help="Patched/deobf output path")
-    ask_p.add_argument("--find", default="Welcome", help="Success needle for password")
+    ask_p.add_argument("--find", default=None, help="Success needle for password (required for password want)")
     ask_p.add_argument("--entry", help="Optional entry VA")
     ask_p.add_argument("--branch", help="VA for force_branch")
     ask_p.add_argument("--force-not-taken", action="store_true")
@@ -650,7 +684,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max LLM tool rounds (default 32; raise for deep RE, not unlimited)",
     )
     ag.add_argument("--json", help="Write AgentResult JSON")
-    ag.add_argument("-v", "--verbose", action="store_true")
+    ag.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=True,
+        help="Print step/tool logs (default on)",
+    )
+    ag.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Disable step/tool logs",
+    )
     ag.set_defaults(func=cmd_agent)
 
     ev = sp.add_parser("eval", help="Timing metrics (ms/function) or --corpus scan")

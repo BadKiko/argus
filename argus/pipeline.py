@@ -46,13 +46,8 @@ def run_pipeline(
 
     fn = function
     if not fn:
-        # pick a large function or main
         if "main" in img.symbols:
             fn = "main"
-        elif "authenticate" in img.symbols:
-            fn = "authenticate"
-        elif "target_function" in img.symbols:
-            fn = "target_function"
         else:
             fn = None
 

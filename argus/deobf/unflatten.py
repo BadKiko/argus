@@ -154,7 +154,7 @@ def _detect_cmove_state(blk: CFGBlock, state_slot: str) -> Optional[dict]:
         if md and imm is not None:
             # remember spill slot → imm
             pass
-    # Spilled form used in authenticate strcmp block
+    # Spilled form: imm moved via stack slot then restored to cmp regs
     if imm_a is None or imm_b is None:
         spills: Dict[str, int] = {}
         for i in range(cmov_idx):
@@ -457,6 +457,7 @@ def solve_after_deobf(
     path: str,
     function: str | list[str] | None = None,
     stdin_len: int = 24,
+    find: bytes | None = None,
 ) -> "SolveResult":
     """Unflatten CFF functions to a temp binary, then symbolic-solve."""
     import os
@@ -467,20 +468,19 @@ def solve_after_deobf(
 
     img = load_binary(path)
     if function is None:
-        # Prefer known crackme pair; else main + largest funcs with CFF
-        candidates = []
-        for name in ("authenticate", "main"):
-            if name in img.symbols:
-                candidates.append(name)
-        if not candidates:
-            candidates = ["main"] if "main" in img.symbols else []
-        function = candidates or "main"
+        function = ["main"] if "main" in img.symbols else "main"
+    elif isinstance(function, str):
+        # Always unflatten main alongside the target when solving (CFF often spans both)
+        fns = [function]
+        if function != "main" and "main" in img.symbols:
+            fns.append("main")
+        function = fns
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".deobf") as f:
         tmp = f.name
     try:
         deobf_and_patch(path, function, tmp, verify_stdin=b"")
-        return solve_binary(tmp)
+        return solve_binary(tmp, find=find)
     finally:
         try:
             os.unlink(tmp)

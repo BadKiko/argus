@@ -31,7 +31,7 @@ def _need(*parts: str) -> Path:
 # --- Tier A -----------------------------------------------------------------
 
 def test_tier_a_fauxware_solve():
-    res = solve_binary(str(_need("fauxware")))
+    res = solve_binary(str(_need("fauxware")), find=b"Welcome")
     assert res.success and res.stdin and b"SOSNEAKY" in res.stdin
 
 
@@ -46,7 +46,7 @@ def test_tier_a_fauxware_fla_cff():
 def test_tier_a_fauxware_fla_solve_after_deobf():
     from argus.deobf import solve_after_deobf
 
-    res = solve_after_deobf(str(_need("fauxware_fla")))
+    res = solve_after_deobf(str(_need("fauxware_fla")), function="authenticate", find=b"Welcome")
     assert res.success and res.stdin and b"SOSNEAKY" in res.stdin
 
 

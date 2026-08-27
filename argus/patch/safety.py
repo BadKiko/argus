@@ -3,12 +3,26 @@ from __future__ import annotations
 """Heuristics: will this patch break app startup? Feed result back to the LLM."""
 
 import os
+import signal
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from argus.binary import load_binary
+
+# Executing multi‑MB GUI apps as "smoke" orphans windows (fork/daemonize).
+_SMOKE_MAX_TEXT = 400_000
+_GUI_IMPORT_MARKERS = (
+    "gtk_",
+    "gdk_",
+    "qt_",
+    "qapplication",
+    "xopendisplay",
+    "xcb_",
+    "wayland",
+    "glfw",
+    "sdl_",
+)
 
 
 def _is_early_ret_stub(prologue: bytes) -> bool:
@@ -85,15 +99,34 @@ def preflight_patch(
     return {"safe": True, "reason": "", "next_hint": "", "entry": hex(entry)}
 
 
+def _text_size(img) -> int:
+    for s in img.sections:
+        if s.name == ".text" or s.name.lower().endswith("text"):
+            return len(s.data)
+    return 0
+
+
+def _looks_gui_or_heavy(img) -> bool:
+    """Large .text / GUI imports → do not exec as smoke (leaves windows alive)."""
+    if _text_size(img) >= _SMOKE_MAX_TEXT:
+        return True
+    for name in img.imports.values():
+        low = (name or "").lower()
+        if any(m in low for m in _GUI_IMPORT_MARKERS):
+            return True
+    return False
+
+
 def assess_patched_binary(
     original_path: str,
     patched_path: str,
     *,
     smoke_timeout: float = 0.4,
+    allow_smoke: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
-    After write: check entry prologue + short smoke run vs original.
-    If unsafe, caller should treat patch as failed and ask LLM to re-patch.
+    After write: check entry prologue; optional short smoke vs original for small CLI ELFs.
+    Heavy/GUI binaries skip exec smoke (static prologue only) — running them orphans apps.
     """
     if not Path(patched_path).is_file():
         return {
@@ -121,11 +154,13 @@ def assess_patched_binary(
             "patched_prologue": p_pro[:8].hex(),
         }
 
-    # GUI / long-running heuristic: original still running at timeout → patched must not exit instantly empty
-    if orig.fmt == "elf":
+    do_smoke = allow_smoke if allow_smoke is not None else (
+        orig.fmt == "elf" and not _looks_gui_or_heavy(orig)
+    )
+    if do_smoke and orig.fmt == "elf":
         o_run = _smoke_run(original_path, smoke_timeout)
         p_run = _smoke_run(patched_path, smoke_timeout)
-        # Original timed out (still alive) but patched exited fast with no output → broken GUI
+        # Original timed out (still alive) but patched exited fast with no output → broken
         if o_run.get("timeout") and not p_run.get("timeout"):
             out = p_run.get("stdout") or b""
             err = p_run.get("stderr") or b""
@@ -147,7 +182,6 @@ def assess_patched_binary(
                         "returncode": p_run.get("returncode"),
                     },
                 }
-        # Patched crash / segfault vs original ok
         if o_run.get("ok") and p_run.get("ok"):
             orc = o_run.get("returncode")
             prc = p_run.get("returncode")
@@ -159,7 +193,7 @@ def assess_patched_binary(
                     "entry": hex(entry),
                 }
 
-    return {
+    out: Dict[str, Any] = {
         "safe": True,
         "reason": "",
         "next_hint": "",
@@ -167,27 +201,59 @@ def assess_patched_binary(
         "orig_prologue": o_pro[:8].hex(),
         "patched_prologue": p_pro[:8].hex(),
     }
+    if not do_smoke:
+        out["smoke"] = "skipped_gui_or_heavy"
+    return out
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 def _smoke_run(path: str, timeout: float) -> Dict[str, Any]:
+    """Short CLI smoke in a new session; kill the whole group on timeout."""
+    env = {
+        **os.environ,
+        "QT_QPA_PLATFORM": "offscreen",
+        "DISPLAY": "",
+        "WAYLAND_DISPLAY": "",
+    }
     try:
-        p = subprocess.run(
+        proc = subprocess.Popen(
             [path],
-            input=b"\n\n",
-            capture_output=True,
-            timeout=timeout,
-            env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "DISPLAY": os.environ.get("DISPLAY", "")},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            env=env,
         )
+    except Exception as e:
+        return {"ok": False, "timeout": False, "reason": str(e), "returncode": None}
+
+    try:
+        stdout, stderr = proc.communicate(input=b"\n\n", timeout=timeout)
         return {
             "ok": True,
             "timeout": False,
-            "returncode": p.returncode,
-            "stdout": p.stdout[:200],
-            "stderr": p.stderr[:200],
+            "returncode": proc.returncode,
+            "stdout": (stdout or b"")[:200],
+            "stderr": (stderr or b"")[:200],
         }
     except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        try:
+            proc.communicate(timeout=0.5)
+        except Exception:
+            pass
         return {"ok": True, "timeout": True, "returncode": None, "stdout": b"", "stderr": b""}
     except Exception as e:
+        _kill_process_group(proc)
         return {"ok": False, "timeout": False, "reason": str(e), "returncode": None}
 
 

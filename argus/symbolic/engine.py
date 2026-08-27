@@ -580,7 +580,7 @@ class Engine:
         self._return(state)
 
     def hook_open(self, eng: "Engine", state: SimState) -> None:
-        # Always fail open for fauxware backdoor path (force password path)
+        # Neutral: fail open (ENFILE-style). Do not force a password/backdoor path.
         state.set_reg("rax", -1)
         self._return(state)
 

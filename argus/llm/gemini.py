@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -108,8 +110,63 @@ class GeminiClient:
         # allow models/gemini-... or bare gemini-...
         if model.startswith("models/"):
             model = model[len("models/") :]
-        q = urllib.parse.urlencode({"key": self.config.api_key})
-        return f"{self.config.base_url}/models/{model}:generateContent?{q}"
+        # key goes in header (x-goog-api-key), not query — cleaner for curl/process lists
+        return f"{self.config.base_url}/models/{model}:generateContent"
+
+    def _post_curl(self, url: str, data: bytes) -> Tuple[int, bytes]:
+        """Prefer system curl — more reliable TLS than urllib on flaky middleboxes."""
+        curl = shutil.which("curl")
+        if not curl:
+            raise RuntimeError("curl not found")
+        cmd = [
+            curl,
+            "-sS",
+            "--http1.1",
+            "-X",
+            "POST",
+            url,
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            f"x-goog-api-key: {self.config.api_key}",
+            "-H",
+            "User-Agent: argus-re/0.2",
+            "--data-binary",
+            "@-",
+            "-w",
+            "\n%{http_code}",
+            "--max-time",
+            str(int(self.config.timeout)),
+        ]
+        proc = subprocess.run(cmd, input=data, capture_output=True, timeout=self.config.timeout + 15)
+        if proc.returncode != 0:
+            err = (proc.stderr or b"").decode("utf-8", errors="replace")
+            raise OSError(f"curl failed rc={proc.returncode}: {err[:300]}")
+        out = proc.stdout or b""
+        # last line is http code
+        if b"\n" not in out:
+            raise OSError("curl: empty response")
+        body, _, code_b = out.rpartition(b"\n")
+        try:
+            code = int(code_b.strip() or b"0")
+        except ValueError:
+            code = 0
+            body = out
+        return code, body
+
+    def _post_urllib(self, url: str, data: bytes) -> Tuple[int, bytes]:
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "argus-re/0.2",
+            "x-goog-api-key": self.config.api_key,
+            "Connection": "close",
+        }
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
 
     def generate(
         self,
@@ -129,72 +186,58 @@ class GeminiClient:
 
         data = json.dumps(body).encode("utf-8")
         url = self._endpoint()
-        headers = {"Content-Type": "application/json", "User-Agent": "argus-re/0.2"}
         last_err: Optional[Exception] = None
-        max_attempts = 4  # allow a couple of full 60s 429 waits
+        max_attempts = 6
+        prefer_curl = shutil.which("curl") is not None
         for attempt in range(1, max_attempts + 1):
-            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            use_curl = prefer_curl and (attempt <= 3 or attempt % 2 == 1)
             try:
-                with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                if use_curl:
+                    code, raw = self._post_curl(url, data)
+                else:
+                    code, raw = self._post_urllib(url, data)
             except TimeoutError as e:
                 last_err = e
                 if attempt >= max_attempts:
                     raise RuntimeError(
                         f"Gemini timed out after {self.config.timeout}s for model={self.config.model}. "
-                        f"Try --model gemini-3.6-flash (3.7-flash often hangs)."
+                        f"Try --model gemini-3.6-flash."
                     ) from e
                 time.sleep(1.5 * attempt)
-            except urllib.error.HTTPError as e:
-                err = e.read().decode("utf-8", errors="replace")
-                if e.code == 429 and attempt < max_attempts:
-                    wait = _retry_after_seconds(err, RATE_LIMIT_WAIT_SEC)
-                    print(
-                        f"[gemini] HTTP 429 rate limit — waiting {wait:.0f}s "
-                        f"(attempt {attempt}/{max_attempts}) …",
-                        flush=True,
-                    )
-                    time.sleep(wait)
-                    last_err = e
-                    continue
-                if e.code in (500, 502, 503, 504) and attempt < max_attempts:
-                    time.sleep(1.5 * attempt)
-                    last_err = e
-                    continue
-                raise RuntimeError(f"Gemini HTTP {e.code}: {err[:800]}") from e
-            except urllib.error.URLError as e:
-                last_err = e
-                reason = str(e.reason) if getattr(e, "reason", None) else str(e)
-                transient = any(
-                    x in reason.lower()
-                    for x in (
-                        "timed out",
-                        "timeout",
-                        "unexpected_eof",
-                        "eof occurred",
-                        "connection reset",
-                        "broken pipe",
-                        "temporarily unavailable",
-                        "ssl",
-                    )
-                )
-                if "timed out" in reason.lower() or "timeout" in reason.lower():
-                    if attempt >= max_attempts:
-                        raise RuntimeError(
-                            f"Gemini timed out after {self.config.timeout}s for model={self.config.model}. "
-                            f"Try --model gemini-3.6-flash."
-                        ) from e
-                elif not transient or attempt >= max_attempts:
-                    raise RuntimeError(f"Gemini connection failed: {e}") from e
-                time.sleep(1.5 * attempt)
                 continue
-            except OSError as e:
-                # some SSL errors surface as OSError
+            except (OSError, urllib.error.URLError) as e:
                 last_err = e
+                reason = str(getattr(e, "reason", e))
+                wait = min(5.0 * attempt, 25.0)
+                print(
+                    f"[gemini] connection/SSL glitch via "
+                    f"{'curl' if use_curl else 'urllib'} — retry in {wait:.0f}s "
+                    f"(attempt {attempt}/{max_attempts}) …",
+                    flush=True,
+                )
                 if attempt >= max_attempts:
                     raise RuntimeError(f"Gemini connection failed: {e}") from e
-                time.sleep(1.5 * attempt)
+                time.sleep(wait)
                 continue
+
+            text = raw.decode("utf-8", errors="replace")
+            if code == 200:
+                return json.loads(text)
+            if code == 429 and attempt < max_attempts:
+                wait = _retry_after_seconds(text, RATE_LIMIT_WAIT_SEC)
+                print(
+                    f"[gemini] HTTP 429 rate limit — waiting {wait:.0f}s "
+                    f"(attempt {attempt}/{max_attempts}) …",
+                    flush=True,
+                )
+                time.sleep(wait)
+                last_err = RuntimeError(f"HTTP 429: {text[:200]}")
+                continue
+            if code in (500, 502, 503, 504) and attempt < max_attempts:
+                time.sleep(1.5 * attempt)
+                last_err = RuntimeError(f"HTTP {code}: {text[:200]}")
+                continue
+            raise RuntimeError(f"Gemini HTTP {code}: {text[:800]}")
         raise RuntimeError(f"Gemini connection failed after retries: {last_err}")
 
     def parse_response(self, response: Dict[str, Any]) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[Dict[str, Any]]]:

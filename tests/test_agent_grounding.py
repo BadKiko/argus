@@ -35,7 +35,7 @@ def test_pick_function_entry_when_no_main():
 def test_nl_remove_license_is_patch_not_lift():
     h = parse_prompt("убери проверку лицензии")
     assert h.want == Want.PATCH
-    assert h.patch_kind in (PatchKind.SKIP_CHECK, PatchKind.ALWAYS_TRUE)
+    assert h.patch_kind in (PatchKind.SKIP_CHECK, PatchKind.ALWAYS_TRUE, PatchKind.RET_IMM)
 
 
 def test_nl_how_license_still_lift():
@@ -50,6 +50,41 @@ def test_argus_find_on_fauxware():
     assert data["hits"]
     kinds = {h["kind"] for h in data["hits"]}
     assert "string" in kinds or "symbol" in kinds
+
+
+def test_gate_score_prefers_short_is_over_callback():
+    from argus.find import _gate_score, _suggested_ret_value
+
+    assert _gate_score("IsLicenseGenuine", True) > _gate_score("_Z15LicenseCallbackj", True)
+    assert _gate_score("_Z15LicenseCallbackj", True) < 0  # UI callback demoted
+    assert _suggested_ret_value("IsLicenseGenuine") == 0
+    assert _suggested_ret_value("_ZN16LicenseActivator11isActivatedEv") == 1
+
+
+def test_find_ui_query_does_not_prefer_unlock_stubs():
+    from argus.find import _query_intent, find_in_binary
+
+    assert _query_intent("Groot Pro") == "ui"
+    assert _query_intent("заголовок и days left") == "ui"
+    assert _query_intent("убери проверку лицензии") == "unlock"
+    path = str(SAMPLES / "fauxware")
+    data = find_in_binary(path, "Welcome title")
+    assert "replace_string" in (data.get("next_hint") or "") or "UI/text" in (data.get("next_hint") or "")
+
+
+def test_find_groot_suggested_stubs_if_present():
+    from pathlib import Path
+
+    groot = Path.home() / "Apps/craGroot190/bin/groot2"
+    if not groot.is_file():
+        return
+    data = find_in_binary(str(groot), "license")
+    stubs = data.get("suggested_stubs") or []
+    assert stubs, "expected ranked gate stubs"
+    names = [s["name"] for s in stubs]
+    assert any(n.startswith("Is") and "License" in n for n in names)
+    assert "LicenseCallback" not in "".join(names)
+    assert "suggested_stubs" in (data.get("next_hint") or "") or "PREFERRED" in (data.get("next_hint") or "")
 
 
 def test_dispatch_argus_find_envelope():
@@ -86,6 +121,7 @@ def test_tools_include_find_and_new_patch_kinds():
     patch = next(t for t in ARGUS_TOOLS if t["function"]["name"] == "argus_patch")
     kinds = patch["function"]["parameters"]["properties"]["kind"]["enum"]
     assert "nop_bytes" in kinds and "ret_imm" in kinds and "force_branch" in kinds
+    assert "unlock_license" not in kinds
 
 
 def test_ask_ret_imm_and_default_patched_suffix(tmp_path):
@@ -121,7 +157,14 @@ def test_skip_check_still_patches_authenticate(tmp_path):
     out = tmp_path / "out.patched"
     r = ask(
         str(src),
-        Hint(want=Want.PATCH, patch_kind=PatchKind.SKIP_CHECK, output=str(out), note="убери проверку"),
+        Hint(
+            want=Want.PATCH,
+            patch_kind=PatchKind.SKIP_CHECK,
+            function="authenticate",
+            output=str(out),
+            note="убери проверку",
+            find=b"Welcome",
+        ),
     )
     assert r.ok and out.exists()
     p = subprocess.run([str(out)], input=b"x\ny\n", capture_output=True)
@@ -141,12 +184,31 @@ def test_tools_include_xrefs():
     assert "argus_find" in names
 
 
-def test_unlock_license_in_patch_kinds():
+def test_ret_imm_not_unlock_license_in_patch_kinds():
     patch = next(t for t in ARGUS_TOOLS if t["function"]["name"] == "argus_patch")
     kinds = patch["function"]["parameters"]["properties"]["kind"]["enum"]
-    assert "unlock_license" in kinds
+    assert "ret_imm" in kinds
     assert "replace_string" in kinds
-    assert PatchKind.UNLOCK_LICENSE.value == "unlock_license"
+    assert "unlock_license" not in kinds
+    assert not hasattr(PatchKind, "UNLOCK_LICENSE")
+
+
+def test_nl_unlock_maps_to_ret_imm():
+    h = parse_prompt("любой ключ сразу актив")
+    assert h.want == Want.PATCH
+    assert h.patch_kind == PatchKind.RET_IMM
+    assert h.ret_value == 0
+
+
+def test_safety_skips_smoke_on_heavy_text():
+    from argus.binary import load_binary
+    from argus.patch.safety import _looks_gui_or_heavy
+
+    img = load_binary(str(SAMPLES / "fauxware"))
+    assert _looks_gui_or_heavy(img) is False
+    sublime = Path("/opt/sublime_merge/sublime_merge")
+    if sublime.is_file():
+        assert _looks_gui_or_heavy(load_binary(str(sublime))) is True
 
 
 def test_safety_detects_early_ret_stub(tmp_path):
