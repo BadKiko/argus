@@ -705,7 +705,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM agent with Argus tools (OpenAI-compat or native Gemini AI Studio)",
     )
     ag.add_argument("prompt", help="What you want from the binary")
-    ag.add_argument("binary", nargs="?", help="Path to binary (optional if path is in prompt)")
+    ag.add_argument(
+        "binary",
+        nargs="?",
+        help="Path to binary (optional: discover from prompt path or cwd ELF/PE + linked DLL/SO)",
+    )
     ag.add_argument(
         "--provider",
         choices=["auto", "gemini", "openai"],

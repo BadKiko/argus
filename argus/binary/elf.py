@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Union
 
 from elftools.elf.elffile import ELFFile
 from elftools.elf.relocation import RelocationSection
@@ -148,3 +148,24 @@ def _resolve_plt_imports(elf: ELFFile, symbols: Dict[str, Symbol]) -> Dict[int, 
             imports[plt_addr + entry_size * (i + 1)] = name
 
     return imports
+
+
+def list_elf_needed(path: Union[Path, str]) -> List[str]:
+    """Return DT_NEEDED sonames from the dynamic section."""
+    names: List[str] = []
+    seen: set[str] = set()
+    with Path(path).open("rb") as f:
+        elf = ELFFile(f)
+        for seg in elf.iter_segments():
+            if seg["p_type"] != "PT_DYNAMIC":
+                continue
+            for tag in seg.iter_tags():
+                if tag.entry.d_tag != "DT_NEEDED":
+                    continue
+                name = tag.needed
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+            break
+    return names

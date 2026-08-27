@@ -19,10 +19,13 @@ Rules:
 - Never shorten resource filenames. Never stub main/entry.
 - Logic patches (force_branch/ret_imm) alone do NOT auto-complete a TASK — use argus_unlock_apply for unlock.
 - If ETXTBSY / Text file busy: stop claiming that task done; user must quit the app.
-- Missing file → stop.
+- Missing file → stop. If no binary path: runtime auto-discovers ELF/PE in cwd/prompt; license may live in linked DLL/SO.
 - Stripped: argus_lift with entry=0x… or query=\"exact string\" — do not claim CFF deobf success.
-- Unlock/license: (1) argus_slice (2) ONE argus_unlock_apply using unlock_plan steps (or omit steps to auto-apply).
-  Do not freestyle-patch parser gates outside unlock_plan. Honor taken=/value= from the plan.
+- Unlock/license: (1) argus_slice (multi-module aware) (2) ONE argus_unlock_apply using unlock_plan.
+  Do not freestyle-patch parser gates outside unlock_plan. Honor taken=/value=/module= from the plan.
+  If unlock_plan empty / no gates: do NOT stop — PIVOT: argus_discover, then argus_slice on other
+  candidates/Related modules (DLL/SO), or pass modules=[paths]. Keep searching nearby files until
+  a plan with module= appears or candidates are exhausted.
   Never claim GUI activation; done only when unlock_bytes verify.ok. rodata Unregistered may remain.
 """
 
@@ -69,7 +72,13 @@ def binary_missing(path: Optional[str]) -> bool:
     return not os.path.isfile(path)
 
 
-def _build_user_content(user_prompt: str, binary: Optional[str], tasks_block: str) -> str:
+def _build_user_content(
+    user_prompt: str,
+    binary: Optional[str],
+    tasks_block: str,
+    *,
+    discover: Optional[dict] = None,
+) -> str:
     parts = [user_prompt.strip()]
     if tasks_block:
         parts.append("")
@@ -77,6 +86,17 @@ def _build_user_content(user_prompt: str, binary: Optional[str], tasks_block: st
     if binary:
         parts.append("")
         parts.append(f"Binary path: {binary}")
+    if discover:
+        linked = discover.get("linked") or []
+        if linked:
+            parts.append("Related modules (license may be here):")
+            for m in linked[:8]:
+                parts.append(f"  - {m.get('path')} (score={m.get('score')})")
+        cands = discover.get("candidates") or []
+        if len(cands) > 1:
+            parts.append("Other candidates:")
+            for c in cands[1:6]:
+                parts.append(f"  - {c.get('path')} (score={c.get('score')})")
     return "\n".join(parts)
 
 
@@ -104,10 +124,29 @@ def run_agent(
     max_steps: int = 32,
     verbose: bool = False,
 ) -> AgentResult:
+    from argus.discover import discover_targets
     from argus.llm.tasks import finalize_agent, format_tasks_block, split_user_tasks
 
+    discover_info: Optional[dict] = None
     if binary and binary_missing(binary):
         msg = missing_binary_message(binary)
+        if verbose:
+            print(msg, flush=True)
+        return AgentResult(ok=False, answer=msg, steps=0, provider=resolve_provider(provider))
+
+    # Deterministic discover when path missing; always attach linked modules when possible
+    discover_info = discover_targets(user_prompt, binary=binary)
+    if not binary and discover_info.get("primary"):
+        binary = discover_info["primary"]
+        if verbose:
+            print(f"[discover] primary={binary}", flush=True)
+    elif binary and discover_info.get("linked") and verbose:
+        print(f"[discover] linked={len(discover_info['linked'])}", flush=True)
+    if not binary:
+        msg = (
+            "нет binary: укажите путь или запустите из каталога с ELF/PE "
+            "(argus_discover / auto-scan cwd)"
+        )
         if verbose:
             print(msg, flush=True)
         return AgentResult(ok=False, answer=msg, steps=0, provider=resolve_provider(provider))
@@ -126,6 +165,7 @@ def run_agent(
             url=url,
             max_steps=max_steps,
             verbose=verbose,
+            discover=discover_info,
         )
     return _run_openai(
         user_prompt,
@@ -137,6 +177,7 @@ def run_agent(
         url=url,
         max_steps=max_steps,
         verbose=verbose,
+        discover=discover_info,
     )
 
 
@@ -151,6 +192,7 @@ def _run_openai(
     url: Optional[str],
     max_steps: int,
     verbose: bool,
+    discover: Optional[dict] = None,
 ) -> AgentResult:
     from argus.llm.client import LLMConfig, OpenAICompatClient
     from argus.llm.tasks import finalize_agent, open_tasks_hint
@@ -158,7 +200,7 @@ def _run_openai(
     cfg = LLMConfig.from_env(url=url, key=key, model=model)
     client = OpenAICompatClient(cfg)
 
-    content = _build_user_content(user_prompt, binary, tasks_block)
+    content = _build_user_content(user_prompt, binary, tasks_block, discover=discover)
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": content},
@@ -235,6 +277,7 @@ def _run_gemini(
     url: Optional[str],
     max_steps: int,
     verbose: bool,
+    discover: Optional[dict] = None,
 ) -> AgentResult:
     from argus.llm.gemini import GeminiClient, GeminiConfig
     from argus.llm.tasks import finalize_agent, open_tasks_hint
@@ -250,7 +293,7 @@ def _run_gemini(
         )
     client = GeminiClient(cfg)
 
-    text = _build_user_content(user_prompt, binary, tasks_block)
+    text = _build_user_content(user_prompt, binary, tasks_block, discover=discover)
     contents: List[Dict[str, Any]] = [{"role": "user", "parts": [{"text": text}]}]
     trace: List[Dict[str, Any]] = []
 

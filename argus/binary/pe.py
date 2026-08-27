@@ -78,3 +78,28 @@ def load_pe(path: Path) -> BinaryImage:
         imports=imports,
         memory=memory,
     )
+
+
+def list_pe_dependent_dlls(path: Path | str) -> list[str]:
+    """Return imported DLL basenames (order-preserved, case-insensitive unique)."""
+    pe = pefile.PE(str(path), fast_load=True)
+    try:
+        pe.parse_data_directories(
+            directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]]
+        )
+        names: list[str] = []
+        seen: set[str] = set()
+        if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
+            for entry_imp in pe.DIRECTORY_ENTRY_IMPORT:
+                raw = entry_imp.dll
+                if not raw:
+                    continue
+                name = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                names.append(name)
+        return names
+    finally:
+        pe.close()

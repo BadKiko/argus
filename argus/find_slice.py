@@ -238,11 +238,13 @@ def build_unlock_plan(
 
     def add(g: Dict[str, Any], why: str, priority: int) -> None:
         addr = str(g.get("addr") or "")
-        if not addr or addr in seen_addr:
+        mod = str(g.get("module") or "")
+        key = f"{mod}:{addr}" if mod else addr
+        if not addr or key in seen_addr:
             return
         if len(plan) >= max_steps:
             return
-        seen_addr.add(addr)
+        seen_addr.add(key)
         step: Dict[str, Any] = {
             "kind": g.get("kind"),
             "addr": addr,
@@ -250,6 +252,7 @@ def build_unlock_plan(
             "priority": priority,
             "nearby_fn": g.get("nearby_fn"),
             "xref_addr": g.get("xref_addr"),
+            "module": g.get("module"),
         }
         if g.get("kind") == "force_branch":
             step["taken"] = bool(g.get("taken", False))
@@ -369,6 +372,7 @@ def license_slice(
     Uses substring string recovery + one batched xref pass + unlock_plan.
     """
     img = load_binary(path)
+    module_path = str(path)
     hits: List[Dict[str, Any]] = []
     seen: set[int] = set()
 
@@ -564,11 +568,15 @@ def license_slice(
                 )
 
     gates.sort(key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True)))
+    for g in gates:
+        g["module"] = module_path
     # Keep a wider pool for plan building, then trim display list
     pool = gates[: max(limit * 2, 24)]
     gates_out = gates[:limit]
     non_ui = [g for g in gates_out if not g.get("ui_label_only")]
     unlock_plan = build_unlock_plan(pool, max_steps=5)
+    for s in unlock_plan:
+        s.setdefault("module", module_path)
 
     if unlock_plan:
         s0 = unlock_plan[0]
@@ -585,9 +593,15 @@ def license_slice(
             f"kind={pick.get('kind')} addr={pick.get('addr')} ui_label_only=false."
         )
     elif gates_out:
-        next_hint = "Only UI-ish gates — try another query; do not claim license removed."
+        next_hint = (
+            "Only UI-ish gates — PIVOT: argus_discover / argus_slice modules= other DLL/SO; "
+            "do not claim license removed."
+        )
     else:
-        next_hint = "No license xrefs — incomplete; try another query."
+        next_hint = (
+            "No license xrefs here — PIVOT: argus_discover then slice linked/candidates "
+            "(gate often lives in a sibling .dll/.so), not only this binary."
+        )
 
     return {
         "ok": True,
@@ -609,4 +623,141 @@ def license_slice(
         ],
         "next_hint": next_hint,
         "stripped_like": True,
+        "module": module_path,
+    }
+
+
+def license_slice_modules(
+    primary: str,
+    *,
+    modules: Optional[List[str]] = None,
+    query: Optional[str] = None,
+    limit: int = 16,
+    max_modules: int = 8,
+    auto_widen: bool = True,
+) -> Dict[str, Any]:
+    """
+    Slice primary + related modules; merge gates and build a cross-module unlock_plan.
+    If modules omitted, discover linked modules with license score > 0.
+    If plan still empty and auto_widen: search nearby binaries (siblings / install dir).
+    """
+    from argus.discover import discover_targets, linked_modules, license_needle_score, widen_modules
+
+    paths: List[str] = [primary]
+    if modules:
+        for m in modules:
+            if m and m not in paths:
+                paths.append(m)
+    else:
+        disc = discover_targets(binary=primary, max_linked=max_modules)
+        for m in disc.get("linked") or []:
+            p = m.get("path")
+            if p and int(m.get("score") or 0) > 0 and p not in paths:
+                paths.append(p)
+        if len(paths) == 1:
+            for lp in linked_modules(primary, limit=max_modules):
+                if str(lp) not in paths and license_needle_score(lp) > 0:
+                    paths.append(str(lp))
+
+    paths = paths[: max_modules + 1]
+    all_gates: List[Dict[str, Any]] = []
+    all_hits: List[Dict[str, Any]] = []
+    per_module: List[Dict[str, Any]] = []
+    pivoted = False
+    widened_from: List[str] = []
+
+    def _slice_into(mod_paths: List[str]) -> None:
+        for p in mod_paths:
+            if any(pm.get("module") == p for pm in per_module):
+                continue
+            try:
+                d = license_slice(p, query, limit=limit)
+            except Exception as e:
+                per_module.append({"module": p, "ok": False, "error": str(e)})
+                continue
+            per_module.append(
+                {
+                    "module": p,
+                    "ok": True,
+                    "summary": d.get("summary"),
+                    "plan_len": len(d.get("unlock_plan") or []),
+                    "gates": len(d.get("gate_candidates") or []),
+                }
+            )
+            for g in d.get("gate_candidates") or []:
+                gg = dict(g)
+                gg["module"] = p
+                all_gates.append(gg)
+            for h in d.get("string_hits") or []:
+                hh = dict(h)
+                hh["module"] = p
+                all_hits.append(hh)
+
+    _slice_into(paths)
+
+    unlock_plan = build_unlock_plan(
+        sorted(all_gates, key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True)))[
+            :48
+        ],
+        max_steps=5,
+    )
+
+    # Pivot: nothing usable yet → widen to other nearby files
+    if auto_widen and not unlock_plan:
+        extra = widen_modules(primary, tried=paths, limit=max_modules)
+        extra_paths = [e["path"] for e in extra if e.get("path")]
+        if extra_paths:
+            pivoted = True
+            widened_from = list(extra_paths)
+            paths = list(dict.fromkeys(paths + extra_paths))[: max_modules + 1]
+            _slice_into(extra_paths)
+            all_gates.sort(key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True)))
+            unlock_plan = build_unlock_plan(all_gates[:48], max_steps=5)
+
+    for s in unlock_plan:
+        if not s.get("module"):
+            for g in all_gates:
+                if g.get("addr") == s.get("addr") and g.get("kind") == s.get("kind"):
+                    s["module"] = g.get("module")
+                    break
+            s.setdefault("module", primary)
+
+    non_ui = [g for g in all_gates[:limit] if not g.get("ui_label_only")]
+    if unlock_plan:
+        s0 = unlock_plan[0]
+        pivot_note = f" (pivoted into {widened_from[0]})" if pivoted and widened_from else ""
+        next_hint = (
+            f"UNLOCK: argus_unlock_apply unlock_plan ({len(unlock_plan)} steps); "
+            f"first {s0.get('kind')} addr={s0.get('addr')} module={s0.get('module')}"
+            f"{pivot_note}. Patches apply per-module."
+        )
+    elif pivoted:
+        next_hint = (
+            "Pivoted across nearby binaries — still no unlock_plan. "
+            "Call argus_discover for more candidates, or argus_slice with modules=[...] / another query."
+        )
+    else:
+        next_hint = (
+            "No unlock_plan in primary/linked. "
+            "PIVOT: argus_discover then argus_slice on other candidates "
+            "(license often in DLL/SO), or pass modules=[]."
+        )
+
+    return {
+        "ok": True,
+        "summary": (
+            f"license_slice_modules modules={len(paths)} gates={len(all_gates[:limit])} "
+            f"plan={len(unlock_plan)}"
+            + (" pivoted" if pivoted else "")
+        ),
+        "primary": primary,
+        "modules": paths,
+        "per_module": per_module,
+        "pivoted": pivoted,
+        "widened_from": widened_from,
+        "string_hits": all_hits[:24],
+        "gate_candidates": all_gates[:limit],
+        "unlock_plan": unlock_plan,
+        "next_hint": next_hint,
+        "module": primary,
     }

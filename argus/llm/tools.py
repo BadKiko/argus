@@ -153,27 +153,55 @@ ARGUS_TOOLS: List[dict] = [
         ["binary", "kind"],
     ),
     openai_tool(
+        "argus_discover",
+        "Find the target ELF/PE and related DLL/SO modules when path is missing or unclear, "
+        "or when a prior slice found nothing — re-rank candidates across the install dir. "
+        "Pass for_task. Prefer before unlock if no Binary path or after empty unlock_plan.",
+        {
+            "prompt": {"type": "string", "description": "User task text (may contain paths)"},
+            "root": {"type": "string", "description": "Directory to scan (default cwd)"},
+            "binary": {"type": "string", "description": "Optional known primary path"},
+        },
+        [],
+    ),
+    openai_tool(
         "argus_slice",
         "License unlock discovery (universal): validate/UI strings → xrefs → "
-        "gate_candidates + unlock_plan. Always call before unlock. Then argus_unlock_apply. Pass for_task.",
+        "gate_candidates + unlock_plan. Scans linked DLL/SO when multi=true; auto-widens to "
+        "nearby binaries if primary has no plan. If still empty: pivot via argus_discover. "
+        "Always call before unlock. Then argus_unlock_apply. Pass for_task.",
         {
             "binary": {"type": "string"},
             "query": {"type": "string", "description": "Optional extra phrase e.g. invalid license"},
+            "modules": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Extra module paths (DLL/SO); default = auto linked",
+            },
+            "multi": {
+                "type": "boolean",
+                "description": "Also slice linked modules (default true)",
+            },
         },
         ["binary"],
     ),
     openai_tool(
         "argus_unlock_apply",
-        "Apply unlock_plan in order (ret_imm/force_branch) into one patched binary, then "
+        "Apply unlock_plan in order (ret_imm/force_branch) per module, then "
         "static unlock_bytes verify. Pass steps from argus_slice unlock_plan, or omit steps to "
-        "auto-slice. Prefer this over freestyle argus_patch for license unlock. Pass for_task.",
+        "auto-slice (multi-module). Prefer this over freestyle argus_patch for license unlock. Pass for_task.",
         {
             "binary": {"type": "string"},
-            "output": {"type": "string", "description": "Patched output path (default binary.patched)"},
+            "output": {"type": "string", "description": "Patched primary output path (default binary.patched)"},
             "query": {"type": "string", "description": "Optional query if auto-building plan"},
+            "modules": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Extra modules to include in auto plan",
+            },
             "steps": {
                 "type": "array",
-                "description": "unlock_plan steps from argus_slice",
+                "description": "unlock_plan steps from argus_slice (may include module=)",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -181,6 +209,7 @@ ARGUS_TOOLS: List[dict] = [
                         "addr": {"type": "string"},
                         "value": {"type": "integer"},
                         "taken": {"type": "boolean"},
+                        "module": {"type": "string"},
                         "why": {"type": "string"},
                     },
                 },
@@ -412,8 +441,8 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
 
 def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
     """Execute one Argus tool; return JSON/text for the model."""
-    # All current Argus tools need a real binary on disk
-    if name.startswith("argus_"):
+    # Discover may run without a known binary; everything else needs a file on disk
+    if name.startswith("argus_") and name != "argus_discover":
         err = _require_binary(arguments)
         if err is not None:
             return err
@@ -654,15 +683,53 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 pass
         return env
 
-    if name == "argus_slice":
-        from argus.find_slice import license_slice
+    if name == "argus_discover":
+        from argus.discover import discover_targets
 
-        d = license_slice(arguments["binary"], arguments.get("query"))
+        d = discover_targets(
+            arguments.get("prompt") or "",
+            root=arguments.get("root"),
+            binary=arguments.get("binary"),
+        )
+        return _truncate(
+            {
+                "ok": bool(d.get("ok")),
+                "summary": d.get("summary"),
+                "next_hint": d.get("next_hint"),
+                "primary": d.get("primary"),
+                "candidates": d.get("candidates") or [],
+                "linked": d.get("linked") or [],
+                "evidence": {
+                    "primary": d.get("primary"),
+                    "linked": d.get("linked") or [],
+                },
+                "verify": {"kind": "none", "ok": None},
+            },
+            limit=8000,
+        )
+
+    if name == "argus_slice":
+        from argus.find_slice import license_slice, license_slice_modules
+
+        binary = arguments["binary"]
+        query = arguments.get("query")
+        multi = arguments.get("multi")
+        if multi is None:
+            multi = True
+        modules = arguments.get("modules")
+        if multi:
+            d = license_slice_modules(binary, modules=modules, query=query, auto_widen=True)
+        else:
+            d = license_slice(binary, query)
         return _truncate(
             {
                 "ok": True,
                 "summary": d.get("summary"),
                 "next_hint": d.get("next_hint"),
+                "modules": d.get("modules") or [binary],
+                "pivoted": d.get("pivoted"),
+                "widened_from": d.get("widened_from") or [],
+                "per_module": d.get("per_module") or [],
                 "gate_candidates": d.get("gate_candidates") or [],
                 "unlock_plan": d.get("unlock_plan") or [],
                 "string_hits": d.get("string_hits") or [],
@@ -670,6 +737,8 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                     "gate_candidates": d.get("gate_candidates") or [],
                     "unlock_plan": d.get("unlock_plan") or [],
                     "string_hits": d.get("string_hits") or [],
+                    "modules": d.get("modules") or [binary],
+                    "pivoted": d.get("pivoted"),
                 },
                 "verify": {"kind": "none", "ok": None},
             },
@@ -677,13 +746,20 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         )
 
     if name == "argus_unlock_apply":
+        from argus.discover import discover_targets
         from argus.unlock import unlock_apply
 
+        binary = arguments["binary"]
+        modules = arguments.get("modules")
+        if not arguments.get("steps") and modules is None:
+            disc = discover_targets("", binary=binary)
+            modules = [m["path"] for m in (disc.get("linked") or [])] or None
         d = unlock_apply(
-            arguments["binary"],
+            binary,
             output=arguments.get("output"),
             steps=arguments.get("steps"),
             query=arguments.get("query"),
+            modules=modules,
         )
         return _truncate(
             {
@@ -691,6 +767,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 "summary": d.get("summary"),
                 "next_hint": d.get("next_hint"),
                 "patched_path": d.get("patched_path"),
+                "patched_paths": d.get("patched_paths") or {},
                 "unlock_plan": d.get("unlock_plan") or [],
                 "applied": d.get("applied") or [],
                 "verify": d.get("verify")
