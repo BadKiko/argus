@@ -69,7 +69,8 @@ def test_license_slice_fauxware_smoke():
     assert isinstance(d["unlock_plan"], list)
 
 
-def test_unlock_apply_fauxware_authenticate(tmp_path):
+def test_unlock_apply_fauxware_rejects_invented_steps(tmp_path):
+    """Fauxware is a password crackme — invented authenticate stub is not slice-sourced."""
     import shutil
 
     from argus.binary import load_binary
@@ -83,16 +84,13 @@ def test_unlock_apply_fauxware_authenticate(tmp_path):
     ]
     out = tmp_path / "out.patched"
     d = unlock_apply(str(src), output=str(out), steps=steps)
-    assert out.exists()
-    assert d["verify"]["kind"] == "unlock_bytes"
-    assert d["verify"]["ok"] is True
-    assert d["ok"] is True
-    # byte pattern
-    v = verify_unlock_bytes(str(src), str(out), steps)
-    assert v["ok"] is True
+    assert d.get("plan_source") == "rejected_model"
+    assert d.get("ok") is False
+    assert d["verify"]["ok"] is False
 
 
 def test_dispatch_unlock_apply_and_finalize(tmp_path):
+    """Finalize accepts unlock only with slice plan evidence + plan_source=slice."""
     import shutil
 
     from argus.binary import load_binary
@@ -101,26 +99,51 @@ def test_dispatch_unlock_apply_and_finalize(tmp_path):
     shutil.copy(SAMPLES / "fauxware", src)
     img = load_binary(str(src))
     auth = img.symbols["authenticate"].addr
+    step = {"kind": "ret_imm", "addr": hex(auth), "value": 1}
     raw = dispatch_tool(
         "argus_unlock_apply",
         {
             "binary": str(src),
             "output": str(tmp_path / "u.patched"),
-            "steps": [{"kind": "ret_imm", "addr": hex(auth), "value": 1}],
+            "steps": [step],
             "for_task": 1,
         },
     )
     data = json.loads(raw)
-    assert data.get("verify", {}).get("ok") is True
-    assert "argus_unlock_apply" in {t["function"]["name"] for t in ARGUS_TOOLS}
+    assert data.get("ok") is False
+    assert data.get("plan_source") == "rejected_model" or (
+        data.get("evidence") or {}
+    ).get("plan_source") == "rejected_model"
 
     tasks = [UserTask(id=1, text="unlock license check")]
     trace = [
         {
+            "tool": "argus_slice",
+            "args": {"for_task": 1},
+            "result": {
+                "ok": True,
+                "for_task": 1,
+                "unlock_plan": [step],
+                "evidence": {"unlock_plan": [step]},
+            },
+        },
+        {
             "tool": "argus_unlock_apply",
             "args": {"for_task": 1},
-            "result": data,
-        }
+            "result": {
+                "ok": True,
+                "for_task": 1,
+                "plan_source": "slice",
+                "slice_plan_len": 1,
+                "verify": {
+                    "kind": "unlock_composite",
+                    "ok": True,
+                    "detail": "bytes+behavior ok",
+                    "unlock_bytes": {"ok": True},
+                    "unlock_behavior": {"ok": True, "ran": True},
+                },
+            },
+        },
     ]
     result = finalize_agent(tasks, trace, model_answer="done")
     assert result.task_statuses

@@ -17,6 +17,8 @@ def force_branch(path: str, addr: int, output: str, taken: bool = True) -> Tuple
     ok = False
     if taken and 0x70 <= op <= 0x7F:
         ok = patcher.patch_bytes(addr, bytes([0xEB, patcher.data[fo + 1]]), note="force taken")
+    elif taken and op == 0xEB:
+        ok = patcher.patch_bytes(addr, bytes([0xEB, 0x00]), note="redirect jmp to fallthrough")
     elif taken and op == 0x0F and patcher.data[fo + 1] in (0x84, 0x85):
         rel = bytes(patcher.data[fo + 2 : fo + 6])
         ok = patcher.patch_bytes(addr, b"\xe9" + rel + b"\x90", note="force taken near")
