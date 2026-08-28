@@ -11,3 +11,4 @@ build/
 htmlcov/
 argus/ml/models/*.pt
 third_party/
+argus-backend/.env
