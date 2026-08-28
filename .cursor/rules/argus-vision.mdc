@@ -67,9 +67,9 @@ Use static hints first; add dynamic observation when needed (mappings, branches,
 
 | Avoid (legacy/task-specific) | Prefer (neutral) |
 |------------------------------|------------------|
-| `license_slice`, `unlock_plan` | `gate_scan`, `patch_plan` |
-| `unlock_apply` | `apply_plan`, `patch_apply` |
-| `license_needle_score` | `signal_score`, `heuristic_score` |
+| `gate_scan`, `patch_plan` | `gate_scan`, `patch_plan` |
+| `apply_plan` | `apply_plan`, `patch_apply` |
+| `signal_score` | `signal_score`, `heuristic_score` |
 | intent mode `LICENSE` only | task routing **hints**, not hard modes |
 | "unlock", "crack", "bypass license" in user-facing design | "transform", "verify behavior", "patch plan" |
 
@@ -98,3 +98,5 @@ Optimize **unseen binary success rate**: use past cases to solve new artifacts, 
 - Not an "AI cracker" product.
 
 Build an **agentic binary laboratory with persistent experience and verification**.
+
+**Naming (0.2.x):** legacy `unlock_*` / `license_*` API names were removed. See [docs/ARGUS_VISION.md](../../docs/ARGUS_VISION.md).

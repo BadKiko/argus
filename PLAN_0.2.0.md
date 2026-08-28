@@ -158,3 +158,21 @@ Release gate 0.2.0:
 - Универсальный VMProtect/Themida unpack «как коммерческий тул»
 - 100% на произвольном бинаре без hint/якоря от ИИ
 - Замена GNN на LLM-inside-hotpath (GNN остаётся proposer, LLM — снаружи через Hint)
+
+---
+
+## Naming refactor (0.2.x)
+
+Hard break from license/unlock-centric API. Full vision: [docs/ARGUS_VISION.md](docs/ARGUS_VISION.md).
+
+| Legacy | Target |
+|--------|--------|
+| `gate_scan` / `gate_scan_modules` | `gate_scan` / `gate_scan_modules` |
+| `build_patch_plan` | `build_patch_plan` |
+| `patch_plan` (JSON) | `patch_plan` |
+| `unlock.py` / `apply_plan` | `apply_plan.py` / `apply_plan()` |
+| `argus_apply_plan` | `argus_apply_plan` |
+| `signal_score` | `signal_score` |
+| `TaskKind.GATE_TRANSFORM` | `TaskKind.GATE_TRANSFORM` |
+
+Waves: core scan → apply_plan module → agent tools → memory/backend → certificates → IR skeleton.
