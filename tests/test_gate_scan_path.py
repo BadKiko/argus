@@ -48,7 +48,23 @@ def test_sublime_jmp_table_and_slice_optional():
     assert not gates[0].get("ui_label_only")
 
 
-def test_abs_xref_embed_optional():
+def test_bcompare_call_cmp_refcount_not_gate_optional():
+    """Regression: cmp [rax-0xc],1 after call must not become ret_imm mid-function."""
+    from argus.find_slice import _scan_call_cmp1_gates
+
+    path = Path.home() / ".cache/argus/workspaces"
+    candidates = list(path.glob("BCompare-*/BCompare"))
+    if not candidates:
+        return
+    bc = candidates[0]
+    img = load_binary(str(bc))
+    seen: set[str] = set()
+    gates = _scan_call_cmp1_gates(img, 0xCC0E00, 0xCC2000, meta={}, seen_gate=seen)
+    bad = [g for g in gates if g.get("addr") in ("0xcc1030", "0xCC1030")]
+    assert not bad, f"refcount false positive: {bad}"
+    d = gate_scan(str(bc), "license")
+    plan = d.get("patch_plan") or []
+    assert all(s.get("addr") not in ("0xcc1030", "0xCC1030") for s in plan)
     path = Path("/opt/sublime_merge/sublime_merge")
     if not path.is_file():
         return

@@ -299,6 +299,48 @@ def _fn_size(img, addr: Optional[int]) -> int:
     return 0
 
 
+def _fn_entry(img, addr: Optional[int]) -> Optional[int]:
+    if addr is None:
+        return None
+    try:
+        b = function_covering(img, int(addr))
+        if b:
+            return int(b.start)
+    except Exception:
+        pass
+    return None
+
+
+def _is_bool_return_cmp(mnemonic: str, op_str: str) -> bool:
+    """cmp eax/rax/al, 1 — not refcount-style cmp dword ptr [rax±off], 1."""
+    if mnemonic != "cmp":
+        return False
+    ao = (op_str or "").lower().replace(" ", "")
+    if ",1" not in ao and ",0x1" not in ao:
+        return False
+    # Reject memory operands that merely mention rax in an address.
+    if "[" in ao:
+        return False
+    return ao.startswith(("eax,1", "eax,0x1", "rax,1", "rax,0x1", "al,1", "al,0x1"))
+
+
+def _call_cmp_linked(insns: list, call_idx: int, cmp_idx: int) -> bool:
+    """Return-value check must follow call closely — no unrelated control flow."""
+    if cmp_idx <= call_idx or cmp_idx - call_idx > 4:
+        return False
+    for a in range(call_idx + 1, cmp_idx):
+        m = insns[a].mnemonic
+        if m in ("jmp", "ret", "call"):
+            return False
+    return True
+
+
+def _ret_imm_target_ok(img, addr: int) -> bool:
+    """ret_imm must land on a real entry, not a label mid-function."""
+    entry = _fn_entry(img, addr)
+    return entry is not None and int(entry) == int(addr)
+
+
 def _scan_call_cmp1_gates(
     img,
     start: int,
@@ -332,24 +374,28 @@ def _scan_call_cmp1_gates(
             ct = None
         cmp_i = None
         jcc_i = None
-        for a in range(n + 1, min(len(insns), n + 12)):
+        for a in range(n + 1, min(len(insns), n + 6)):
             am = insns[a].mnemonic
             ao = insns[a].op_str or ""
-            if am == "cmp" and (", 1" in ao or ",1" in ao) and (
-                "eax" in ao or "rax" in ao or "al" in ao
-            ):
+            if _is_bool_return_cmp(am, ao):
                 cmp_i = a
                 continue
             if cmp_i is not None and am.startswith("j") and am not in ("jmp", "jecxz", "jrcxz"):
                 jcc_i = a
                 break
-            if am == "call":
+            if am in ("jmp", "ret", "call"):
                 break
         if ct is None or cmp_i is None:
             continue
+        if not _call_cmp_linked(insns, n, cmp_i):
+            continue
         csz = _fn_size(img, ct)
         key = f"ret_imm:{hex(ct)}"
-        if _LARGE_FN <= csz <= _MAX_COVER_STUB and key not in seen_gate:
+        if (
+            _LARGE_FN <= csz <= _MAX_COVER_STUB
+            and key not in seen_gate
+            and _ret_imm_target_ok(img, ct)
+        ):
             seen_gate.add(key)
             out.append(
                 {

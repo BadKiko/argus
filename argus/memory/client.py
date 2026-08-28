@@ -134,6 +134,7 @@ def store_session_case(
     outcome_override: Optional[str] = None,
     user_feedback: str = "",
     user_confirmed: bool = False,
+    runtime_launch: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     if not memory_enabled():
         return None
@@ -150,6 +151,7 @@ def store_session_case(
         outcome_override=outcome_override,
         user_feedback=user_feedback,
         user_confirmed=user_confirmed,
+        runtime_launch=runtime_launch,
     )
     if not report:
         return None

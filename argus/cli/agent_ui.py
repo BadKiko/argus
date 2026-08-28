@@ -2,9 +2,11 @@ from __future__ import annotations
 
 """Rich interactive UI for `argus agent`: results, run patched binary, feedback loop."""
 
+import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -16,6 +18,19 @@ from rich.table import Table
 from rich.text import Text
 
 from argus.llm.agent import AgentResult
+
+
+@dataclass
+class LaunchResult:
+    ok: bool
+    exit_code: Optional[int] = None
+    stdout: str = ""
+    stderr: str = ""
+    detail: str = ""
+    cwd: str = ""
+    ld_library_path: str = ""
+    timed_out: bool = False
+    error_kind: str = ""
 
 
 def _patched_path(res: AgentResult) -> Optional[str]:
@@ -113,36 +128,131 @@ def render_agent_result(console: Console, res: AgentResult, *, show_trace: bool 
         console.print(Panel(tt, title="Tool trace (last 12)", border_style="dim"))
 
 
-def run_patched_binary(console: Console, path: str, *, stdin: bytes = b"\n\n") -> None:
+def _launch_env(path: Path) -> tuple[str, dict[str, str]]:
+    """Run from install dir with LD_LIBRARY_PATH so sibling .so resolve (e.g. BCompare/lib7z.so)."""
+    cwd = str(path.parent)
+    ld_path = cwd
+    try:
+        from argus.llm.session import get_session
+
+        sess = get_session()
+        if sess.install_dir and Path(sess.install_dir).is_dir():
+            cwd = sess.install_dir
+            ld_path = sess.install_dir
+        elif sess.original_binary:
+            orig_parent = str(Path(sess.original_binary).resolve().parent)
+            cwd = orig_parent
+            ld_path = orig_parent
+    except Exception:
+        pass
+
+    env = os.environ.copy()
+    prev = env.get("LD_LIBRARY_PATH", "")
+    parts = [ld_path] + ([prev] if prev else [])
+    env["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys(p for p in parts if p))
+    return cwd, env
+
+
+def _classify_launch(exit_code: Optional[int], stdout: str, stderr: str) -> str:
+    blob = f"{stdout}\n{stderr}".lower()
+    if "error while loading shared libraries" in blob or "cannot open shared object file" in blob:
+        return "loader_error"
+    if exit_code == 127:
+        return "loader_error"
+    if exit_code not in (None, 0):
+        return "nonzero_exit"
+    return ""
+
+
+def launch_failed(result: LaunchResult) -> bool:
+    return not result.ok or bool(result.error_kind)
+
+
+def launch_failure_feedback(result: LaunchResult) -> str:
+    parts: List[str] = []
+    if result.exit_code is not None:
+        parts.append(f"exit={result.exit_code}")
+    if result.detail:
+        parts.append(result.detail)
+    elif result.stderr:
+        parts.append(result.stderr.strip()[:240])
+    elif result.stdout:
+        parts.append(result.stdout.strip()[:240])
+    if result.error_kind == "loader_error":
+        parts.append(
+            f"hint: run with cwd={result.cwd} LD_LIBRARY_PATH={result.ld_library_path} "
+            "(install dir must contain bundled .so)"
+        )
+    return "; ".join(parts)[:500]
+
+
+def run_patched_binary(console: Console, path: str, *, stdin: bytes = b"\n\n") -> LaunchResult:
     p = Path(path)
     if not p.is_file():
         console.print(f"[red]нет файла:[/red] {path}")
-        return
-    console.print(Rule("[cyan]Запуск patched binary[/cyan]", style="dim"))
+        return LaunchResult(ok=False, detail=f"missing file: {path}", error_kind="missing_file")
+
+    cwd, env = _launch_env(p)
+    ld_path = env.get("LD_LIBRARY_PATH", "")
+    console.print(
+        Rule(
+            f"[cyan]Запуск patched binary[/cyan]  [dim]cwd={cwd}[/dim]",
+            style="dim",
+        )
+    )
     try:
         proc = subprocess.run(
-            [str(p)],
+            [str(p.resolve())],
             input=stdin,
             capture_output=True,
             timeout=12,
-            cwd=str(p.parent),
+            cwd=cwd,
+            env=env,
         )
         out = (proc.stdout or b"").decode("utf-8", errors="replace")
         err = (proc.stderr or b"").decode("utf-8", errors="replace")
         text = out or err or "(no output)"
         if err and out:
             text = out + "\n--- stderr ---\n" + err
+        exit_code = proc.returncode
+        error_kind = _classify_launch(exit_code, out, err)
+        detail = (err or out or "").strip()[:500]
         console.print(
             Panel(
                 text[:8000] or "(empty)",
-                title=f"exit={proc.returncode}",
-                border_style="magenta",
+                title=f"exit={exit_code}",
+                border_style="red" if error_kind else "magenta",
             )
+        )
+        return LaunchResult(
+            ok=exit_code == 0 and not error_kind,
+            exit_code=exit_code,
+            stdout=out,
+            stderr=err,
+            detail=detail,
+            cwd=cwd,
+            ld_library_path=ld_path,
+            error_kind=error_kind,
         )
     except subprocess.TimeoutExpired:
         console.print("[yellow]timeout — процесс убит[/yellow]")
+        return LaunchResult(
+            ok=False,
+            detail="launch timeout",
+            cwd=cwd,
+            ld_library_path=ld_path,
+            timed_out=True,
+            error_kind="timeout",
+        )
     except OSError as e:
         console.print(f"[red]не удалось запустить:[/red] {e}")
+        return LaunchResult(
+            ok=False,
+            detail=str(e),
+            cwd=cwd,
+            ld_library_path=ld_path,
+            error_kind="os_error",
+        )
 
 
 def build_retry_prompt(original: str, feedback: str, res: AgentResult) -> str:
@@ -174,6 +284,7 @@ def push_user_case(
     user_confirmed: bool = False,
     discover: Optional[dict] = None,
     steps: int = 0,
+    runtime_launch: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     from argus.memory import store_session_case
 
@@ -187,7 +298,41 @@ def push_user_case(
         outcome_override=outcome,
         user_feedback=user_feedback,
         user_confirmed=user_confirmed,
+        runtime_launch=runtime_launch,
     )
+
+
+def _save_failure_case(
+    console: Console,
+    *,
+    binary: Optional[str],
+    memory_enabled: bool,
+    original_prompt: str,
+    merged_trace: List[Dict[str, Any]],
+    task_statuses: List[Dict[str, Any]],
+    total_steps: int,
+    discover: Optional[dict],
+    user_feedback: str,
+    runtime_launch: Optional[Dict[str, Any]] = None,
+) -> int:
+    if memory_enabled and binary:
+        case_id = push_user_case(
+            binary=binary,
+            task=original_prompt,
+            tool_trace=merged_trace,
+            task_statuses=task_statuses,
+            outcome="failed",
+            user_feedback=user_feedback,
+            user_confirmed=False,
+            discover=discover,
+            steps=total_steps,
+            runtime_launch=runtime_launch,
+        )
+        if case_id:
+            console.print(f"[yellow]failure saved to memory[/yellow] [dim]{case_id}[/dim]")
+        elif memory_enabled:
+            console.print("[dim]memory: не удалось отправить (httpx?)[/dim]")
+    return 1
 
 
 def _startup_failure(res: AgentResult) -> bool:
@@ -240,9 +385,40 @@ def interactive_session(
         render_agent_result(console, res, show_trace=show_trace)
 
         patched = _patched_path(res)
+        launch_result: Optional[LaunchResult] = None
         if patched and sys.stdin.isatty():
             if Confirm.ask("Запустить patched binary?", default=True, console=console):
-                run_patched_binary(console, patched)
+                launch_result = run_patched_binary(console, patched)
+                if launch_failed(launch_result):
+                    feedback = launch_failure_feedback(launch_result)
+                    console.print(
+                        Panel(
+                            feedback,
+                            title="[red]Запуск не удался — сохраняем failure в memory[/red]",
+                            border_style="red",
+                        )
+                    )
+                    return _save_failure_case(
+                        console,
+                        binary=binary,
+                        memory_enabled=memory_enabled,
+                        original_prompt=original_prompt,
+                        merged_trace=merged_trace,
+                        task_statuses=res.task_statuses,
+                        total_steps=total_steps,
+                        discover=discover,
+                        user_feedback=feedback,
+                        runtime_launch={
+                            "exit_code": launch_result.exit_code,
+                            "stderr": (launch_result.stderr or "")[:500],
+                            "stdout": (launch_result.stdout or "")[:500],
+                            "detail": launch_result.detail,
+                            "error_kind": launch_result.error_kind,
+                            "cwd": launch_result.cwd,
+                            "ld_library_path": launch_result.ld_library_path,
+                            "patched_path": patched,
+                        },
+                    )
 
         if not sys.stdin.isatty():
             return 0 if res.ok else 1

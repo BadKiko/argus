@@ -202,6 +202,7 @@ def build_case_report(
     outcome_override: Optional[str] = None,
     user_feedback: str = "",
     user_confirmed: bool = False,
+    runtime_launch: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     strategies = [_parse_trace_entry(e) for e in tool_trace]
     strategies = [s for s in strategies if s.get("tool") in _ARGUS_TOOLS]
@@ -227,10 +228,35 @@ def build_case_report(
         features["user_confirmed"] = True
     if user_feedback:
         features["user_feedback"] = user_feedback[:500]
+    if runtime_launch:
+        features["runtime_launch"] = {
+            k: runtime_launch[k]
+            for k in (
+                "exit_code",
+                "stderr",
+                "stdout",
+                "detail",
+                "error_kind",
+                "cwd",
+                "ld_library_path",
+                "patched_path",
+            )
+            if k in runtime_launch and runtime_launch[k] not in (None, "")
+        }
 
     verification_level = _verification_level(tool_trace, task_statuses)
     outcome = outcome_override or _outcome(task_statuses, tool_trace)
     failure_modes = _failure_modes(tool_trace, task_statuses)
+    if runtime_launch:
+        rk = runtime_launch.get("error_kind") or "launch"
+        detail = runtime_launch.get("detail") or runtime_launch.get("stderr") or ""
+        exit_code = runtime_launch.get("exit_code")
+        prefix = f"runtime {rk}"
+        if exit_code is not None:
+            prefix += f" exit={exit_code}"
+        if detail:
+            prefix += f": {str(detail)[:160]}"
+        failure_modes = [prefix] + failure_modes
     if user_feedback and outcome in ("failed", "incomplete"):
         failure_modes = [user_feedback[:200]] + failure_modes
         failure_modes = failure_modes[:8]
@@ -248,7 +274,7 @@ def build_case_report(
         "outcome": outcome,
         "plan_sourced": plan_sourced,
         "verification_level": verification_level,
-        "failure_modes": _failure_modes(tool_trace, task_statuses),
+        "failure_modes": failure_modes[:8],
         "cost": {"steps": steps, "tool_calls": len(tool_trace)},
         "modules_patched": _modules_patched(tool_trace),
         "client_version": feats["client_version"],
