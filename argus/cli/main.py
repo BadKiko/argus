@@ -399,9 +399,38 @@ def cmd_ai(args: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
+def cmd_memory(args: argparse.Namespace) -> int:
+    """Query remote Argus memory backend."""
+    import json
+
+    from argus.memory.client import MemoryClient, maybe_warn_memory_usage, memory_url
+
+    maybe_warn_memory_usage()
+    url = memory_url()
+    client = MemoryClient(url)
+    if args.memory_cmd == "search":
+        hints = client.search_hints(args.query, k=args.k)
+        console.print(json.dumps({"ok": True, "hints": hints}, indent=2))
+        return 0
+    if args.memory_cmd == "stats":
+        console.print(json.dumps(client.stats(), indent=2))
+        return 0
+    console.print(f"unknown memory subcommand: {args.memory_cmd}")
+    return 1
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
     """LLM agent (OpenAI-compat or native Gemini AI Studio) with Argus tools."""
     import json
+    import os
+    import sys
+
+    if args.no_memory:
+        os.environ["ARGUS_MEMORY"] = "0"
+    if getattr(args, "permissive_unlock", False):
+        os.environ["ARGUS_STRICT_UNLOCK"] = "0"
+    else:
+        os.environ.setdefault("ARGUS_STRICT_UNLOCK", "1")
 
     from argus.llm.agent import binary_missing, missing_binary_message, resolve_provider, run_agent
 
@@ -413,18 +442,77 @@ def cmd_agent(args: argparse.Namespace) -> int:
     model = args.model
     if provider == "gemini" and not model:
         model = "gemini-3.6-flash"
-    console.print(f"provider={provider} model={model or '(default)'}")
-    try:
-        res = run_agent(
-            args.prompt,
+
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if getattr(args, "no_interactive", False):
+        interactive = False
+
+    verbose = bool(args.verbose) and not bool(getattr(args, "quiet", False))
+    memory_on = not args.no_memory
+
+    trace_ui = None
+    if verbose and not getattr(args, "plain_trace", False):
+        from argus.cli.trace_ui import AgentTraceUI
+
+        trace_ui = AgentTraceUI(console)
+
+    run_kwargs = dict(
+        provider=provider,
+        url=args.url,
+        key=args.key,
+        model=model,
+        max_steps=args.max_steps,
+        verbose=verbose,
+        store_memory=not interactive,
+        trace_ui=trace_ui,
+        transcript_path=getattr(args, "transcript", None),
+        transcript_enabled=not getattr(args, "no_transcript", False),
+    )
+
+    if not getattr(args, "no_transcript", False):
+        from argus.llm.transcript import tail_log_hint
+
+        console.print(f"[dim]session log:[/dim] [cyan]tail -f {tail_log_hint()}[/cyan]")
+
+    if interactive:
+        from argus.cli.agent_ui import interactive_session, render_banner
+
+        render_banner(
+            console,
             binary=args.binary,
             provider=provider,
-            url=args.url,
-            key=args.key,
-            model=model,
-            max_steps=args.max_steps,
-            verbose=bool(args.verbose) and not bool(getattr(args, "quiet", False)),
+            model=model or "",
         )
+
+        def run_once_wrapped(prompt: str):
+            try:
+                return run_agent(prompt, args.binary, **run_kwargs)
+            except Exception as e:
+                console.print(f"[red]agent error:[/red] {e}")
+                from argus.llm.agent import AgentResult
+
+                return AgentResult(ok=False, answer=str(e), provider=provider, binary=args.binary)
+
+        code = interactive_session(
+            console,
+            run_once=run_once_wrapped,
+            original_prompt=args.prompt,
+            binary=args.binary,
+            max_retries=args.max_retries,
+            show_trace=False,
+            memory_enabled=memory_on,
+        )
+        if args.json:
+            console.print("[dim]--json ignored in interactive mode (use --no-interactive)[/dim]")
+        return code
+
+    console.print(f"provider={provider} model={model or '(default)'}")
+    if not getattr(args, "no_transcript", False):
+        from argus.llm.transcript import tail_log_hint
+
+        console.print(f"session log: tail -f {tail_log_hint()}")
+    try:
+        res = run_agent(args.prompt, binary=args.binary, **run_kwargs)
     except Exception as e:
         console.print(f"agent error: {e}")
         return 1
@@ -432,7 +520,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
         console.print(f"wrote {args.json}")
-    if bool(args.verbose) and not bool(getattr(args, "quiet", False)):
+    if verbose and not trace_ui:
         for t in res.tool_trace:
             console.print(f"  tool {t['tool']} -> {t['result_preview'][:160]!r}")
     return 0 if res.ok else 1
@@ -716,16 +804,37 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="gemini = AI Studio generateContent; openai = OpenAI-compatible URL",
     )
+    ag.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Disable shared remote case memory (ARGUS_MEMORY=0 for this run)",
+    )
     ag.add_argument("--url", help="API base URL (openai compat, or gemini v1beta root)")
     ag.add_argument("--key", help="API key (GEMINI_API_KEY / OPENAI_API_KEY)")
     ag.add_argument("--model", help="Model id (e.g. gemini-2.0-flash or gpt-4o-mini)")
     ag.add_argument(
         "--max-steps",
         type=int,
-        default=32,
-        help="Max LLM tool rounds (default 32; raise for deep RE, not unlimited)",
+        default=0,
+        help="Max LLM tool rounds (0 = unlimited until model stops or task done)",
     )
     ag.add_argument("--json", help="Write AgentResult JSON")
+    ag.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="Plain output, auto-save memory (no prompts: run binary / success feedback)",
+    )
+    ag.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Interactive mode: max follow-up attempts after user feedback (default 3)",
+    )
+    ag.add_argument(
+        "--permissive-unlock",
+        action="store_true",
+        help="Disable strict unlock gates (allow model-invented unlock steps; debug only)",
+    )
     ag.add_argument(
         "-v",
         "--verbose",
@@ -737,9 +846,34 @@ def build_parser() -> argparse.ArgumentParser:
         "-q",
         "--quiet",
         action="store_true",
-        help="Disable step/tool logs",
+        help="Disable step/tool logs and trace UI",
+    )
+    ag.add_argument(
+        "--plain-trace",
+        action="store_true",
+        help="Old [tool] JSON lines instead of Rich investigation trace",
+    )
+    ag.add_argument(
+        "--transcript",
+        metavar="FILE",
+        default=None,
+        help="Custom JSONL session log path (default: ~/.cache/argus/current.jsonl + /tmp/argus.jsonl)",
+    )
+    ag.add_argument(
+        "--no-transcript",
+        action="store_true",
+        help="Disable automatic session JSONL logging",
     )
     ag.set_defaults(func=cmd_agent)
+
+    mem = sp.add_parser("memory", help="Remote case memory (vector search on argus.cloud.badkiko.ru)")
+    mem_sub = mem.add_subparsers(dest="memory_cmd", required=True)
+    mem_search = mem_sub.add_parser("search", help="Search similar past cases")
+    mem_search.add_argument("query", help="Search query text")
+    mem_search.add_argument("--k", type=int, default=5)
+    mem_search.set_defaults(func=cmd_memory, memory_cmd="search")
+    mem_stats = mem_sub.add_parser("stats", help="Memory backend stats")
+    mem_stats.set_defaults(func=cmd_memory, memory_cmd="stats")
 
     ev = sp.add_parser("eval", help="Timing metrics (ms/function) or --corpus scan")
     ev.add_argument("binary", nargs="?", default=None)
