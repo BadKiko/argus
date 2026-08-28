@@ -1,0 +1,1 @@
+"""Format-specific IR adapters."""
