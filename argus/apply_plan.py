@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from argus.ask import Hint, PatchKind, Want, ask
 from argus.binary import load_binary
 from argus.find_slice import gate_scan, gate_scan_modules
-from argus.llm.session import strict_plan_enabled
+from argus.llm.session import strict_plan_enabled, cached_gate_scan
 
 from argus.prove.certificate import certify_apply_plan, level_from_verify
 
@@ -353,7 +353,12 @@ def apply_plan(
     slice_info: Dict[str, Any] = {}
     plan_source = "empty"
 
-    if multi or modules:
+    use_multi = bool(multi or modules)
+    cached = cached_gate_scan(path, query=query, modules=modules, multi=use_multi) if use_multi else None
+    slice_from_cache = cached is not None
+    if cached is not None:
+        slice_info = cached
+    elif use_multi:
         slice_info = gate_scan_modules(path, modules=modules, query=query)
     else:
         slice_info = gate_scan(path, query)

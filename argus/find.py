@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Keyword / string / symbol find + xrefs for agent grounding."""
 
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -248,7 +249,14 @@ def _score_hit(preview: str, needle: str, kind: str) -> int:
 
 def _exec_scan_bytes(img) -> int:
     total = sum(len(s.data) for s in img.sections if s.executable and s.data)
-    return min(max(total, 8_000_000), 80_000_000)
+    default_cap = min(max(total, 8_000_000), 80_000_000)
+    raw = os.environ.get("ARGUS_XREF_SCAN_MAX", "").strip()
+    if raw:
+        try:
+            return min(int(raw), default_cap)
+        except ValueError:
+            pass
+    return default_cap
 
 
 def find_rodata_vicinity_xrefs(
@@ -354,6 +362,10 @@ def find_string_xrefs_multi(
                         }
                     )
                     start = idx + 1
+
+    remaining = {t for t, bucket in want.items() if len(bucket) < max_per_target}
+    if not remaining:
+        return want
 
     mode = cs.CS_MODE_64 if img.bits == 64 else cs.CS_MODE_32
     md = cs.Cs(cs.CS_ARCH_X86, mode)

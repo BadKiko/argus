@@ -928,42 +928,76 @@ def gate_scan_modules(
     per_module: List[Dict[str, Any]] = []
     pivoted = False
     widened_from: List[str] = []
+    sliced: set[str] = set()
 
-    def _slice_into(mod_paths: List[str]) -> None:
-        for p in mod_paths:
-            if any(pm.get("module") == p for pm in per_module):
-                continue
-            try:
-                d = gate_scan(p, query, limit=limit)
-            except Exception as e:
-                per_module.append({"module": p, "ok": False, "error": str(e)})
-                continue
-            per_module.append(
-                {
-                    "module": p,
-                    "ok": True,
-                    "summary": d.get("summary"),
-                    "plan_len": len(d.get("patch_plan") or []),
-                    "gates": len(d.get("gate_candidates") or []),
-                }
-            )
-            for g in d.get("gate_candidates") or []:
-                gg = dict(g)
-                gg["module"] = p
-                all_gates.append(gg)
-            for h in d.get("string_hits") or []:
-                hh = dict(h)
-                hh["module"] = p
-                all_hits.append(hh)
+    def _merge_slice(d: Dict[str, Any], mod_path: str) -> None:
+        per_module.append(
+            {
+                "module": mod_path,
+                "ok": True,
+                "summary": d.get("summary"),
+                "plan_len": len(d.get("patch_plan") or []),
+                "gates": len(d.get("gate_candidates") or []),
+            }
+        )
+        for g in d.get("gate_candidates") or []:
+            gg = dict(g)
+            gg["module"] = mod_path
+            all_gates.append(gg)
+        for h in d.get("string_hits") or []:
+            hh = dict(h)
+            hh["module"] = mod_path
+            all_hits.append(hh)
 
-    _slice_into(paths)
+    def _slice_one(p: str) -> None:
+        if p in sliced or any(pm.get("module") == p for pm in per_module):
+            return
+        sliced.add(p)
+        try:
+            d = gate_scan(p, query, limit=limit)
+        except Exception as e:
+            per_module.append({"module": p, "ok": False, "error": str(e)})
+            return
+        _merge_slice(d, p)
 
-    patch_plan = build_patch_plan(
-        sorted(all_gates, key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True)))[
-            :48
-        ],
-        max_steps=5,
-    )
+    def _slice_parallel(mod_paths: List[str]) -> None:
+        todo = [p for p in mod_paths if p not in sliced]
+        if not todo:
+            return
+        if len(todo) == 1:
+            _slice_one(todo[0])
+            return
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=min(4, len(todo))) as pool:
+            futures = {pool.submit(gate_scan, p, query, limit=limit): p for p in todo}
+            for fut in as_completed(futures):
+                p = futures[fut]
+                sliced.add(p)
+                try:
+                    d = fut.result()
+                except Exception as e:
+                    per_module.append({"module": p, "ok": False, "error": str(e)})
+                    continue
+                _merge_slice(d, p)
+
+    primary = paths[0]
+    extras = paths[1:]
+    _slice_one(primary)
+
+    def _plan_from_gates() -> List[Dict[str, Any]]:
+        ranked = sorted(
+            all_gates,
+            key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True)),
+        )[:48]
+        return build_patch_plan(ranked, max_steps=5)
+
+    patch_plan = _plan_from_gates()
+
+    # Primary already has a plan → skip expensive scans of low-value linked modules
+    if not patch_plan and extras:
+        _slice_parallel(extras)
+        patch_plan = _plan_from_gates()
 
     # Pivot: nothing usable yet → widen to other nearby files
     if auto_widen and not patch_plan:
@@ -973,9 +1007,9 @@ def gate_scan_modules(
             pivoted = True
             widened_from = list(extra_paths)
             paths = list(dict.fromkeys(paths + extra_paths))[: max_modules + 1]
-            _slice_into(extra_paths)
+            _slice_parallel(extra_paths)
             all_gates.sort(key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True)))
-            patch_plan = build_patch_plan(all_gates[:48], max_steps=5)
+            patch_plan = _plan_from_gates()
 
     for s in patch_plan:
         if not s.get("module"):
@@ -1009,12 +1043,13 @@ def gate_scan_modules(
     return {
         "ok": True,
         "summary": (
-            f"gate_scan_modules modules={len(paths)} gates={len(all_gates[:limit])} "
+            f"gate_scan_modules modules={len(per_module)} gates={len(all_gates[:limit])} "
             f"plan={len(patch_plan)}"
             + (" pivoted" if pivoted else "")
+            + (" lazy" if extras and patch_plan and len(per_module) == 1 else "")
         ),
         "primary": primary,
-        "modules": paths,
+        "modules": [pm["module"] for pm in per_module if pm.get("ok")] or paths,
         "per_module": per_module,
         "pivoted": pivoted,
         "widened_from": widened_from,

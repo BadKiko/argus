@@ -76,13 +76,33 @@ class BinaryImage:
 
 def load_binary(path: str | Path) -> BinaryImage:
     path = Path(path)
+    key = str(path.resolve())
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    if mtime is not None and key in _BINARY_CACHE:
+        cached_mtime, cached = _BINARY_CACHE[key]
+        if cached_mtime == mtime:
+            return cached
     raw = path.read_bytes()
     if raw[:4] == b"\x7fELF":
         from .elf import load_elf
 
-        return load_elf(path)
-    if raw[:2] == b"MZ":
+        img = load_elf(path)
+    elif raw[:2] == b"MZ":
         from .pe import load_pe
 
-        return load_pe(path)
-    raise ValueError(f"Unsupported binary format: {path}")
+        img = load_pe(path)
+    else:
+        raise ValueError(f"Unsupported binary format: {path}")
+    if mtime is not None:
+        _BINARY_CACHE[key] = (mtime, img)
+    return img
+
+
+_BINARY_CACHE: Dict[str, tuple[float, BinaryImage]] = {}
+
+
+def clear_binary_cache() -> None:
+    _BINARY_CACHE.clear()

@@ -488,14 +488,6 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             evidence_extra["blocks_gate_done"] = True
             evidence_extra["reason"] = "freestyle logic patch — not patch_plan"
 
-    if name == "argus_slice":
-        try:
-            slice_payload = json.loads(raw)
-            plan = slice_payload.get("patch_plan") or []
-            record_gate_scan_result(arguments.get("binary") or "", plan)
-        except json.JSONDecodeError:
-            pass
-
     return _inject_task_fields(
         raw,
         for_task=for_task,
@@ -820,6 +812,14 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             d = gate_scan_modules(binary, modules=modules, query=query, auto_widen=True)
         else:
             d = gate_scan(binary, query)
+        record_gate_scan_result(
+            binary,
+            d.get("patch_plan") or [],
+            full=d,
+            query=query,
+            modules=modules,
+            multi=bool(multi),
+        )
         return _truncate(
             {
                 "ok": True,
