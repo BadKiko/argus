@@ -246,6 +246,65 @@ def _score_hit(preview: str, needle: str, kind: str) -> int:
     return score
 
 
+def _exec_scan_bytes(img) -> int:
+    total = sum(len(s.data) for s in img.sections if s.executable and s.data)
+    return min(max(total, 8_000_000), 80_000_000)
+
+
+def find_rodata_vicinity_xrefs(
+    img,
+    target: int,
+    *,
+    radius: int = 768,
+    max_hits: int = 8,
+) -> List[Dict[str, Any]]:
+    """
+    Stripped/Delphi binaries often reference the middle of a rodata blob, not the
+    string start VA. Scan executable sections for 32/64-bit pointers into [target±radius].
+    """
+    import struct
+
+    if img.arch not in ("x86_64", "x86") or not target:
+        return []
+    lo, hi = target - radius, target + radius
+    out: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for sec in img.sections:
+        if not sec.executable or not sec.data:
+            continue
+        data = sec.data
+        for i in range(0, len(data) - 3):
+            for fmt in ("<I", "<Q") if img.bits == 64 else ("<I",):
+                if fmt == "<Q" and i + 8 > len(data):
+                    continue
+                if fmt == "<I" and i + 4 > len(data):
+                    continue
+                size = 8 if fmt == "<Q" else 4
+                try:
+                    v = struct.unpack_from(fmt, data, i)[0]
+                except struct.error:
+                    continue
+                if not (lo <= v <= hi):
+                    continue
+                site = sec.addr + i
+                if site in seen:
+                    continue
+                seen.add(site)
+                out.append(
+                    {
+                        "addr": hex(site),
+                        "mnemonic": "rodata_vicinity",
+                        "op_str": hex(v),
+                        "nearby_fn": _nearby_fn(img, site),
+                        "kind": "vicinity",
+                        "target_ref": hex(v),
+                    }
+                )
+                if len(out) >= max_hits:
+                    return out
+    return out
+
+
 def find_string_xrefs_multi(
     img,
     targets: List[int],
@@ -262,7 +321,8 @@ def find_string_xrefs_multi(
     if not want or img.arch not in ("x86_64", "x86"):
         return want
 
-    # Fast path: embed little-endian VA bytes in executable sections (movabs / push / lea abs)
+    if max_scan_bytes == 8_000_000:
+        max_scan_bytes = _exec_scan_bytes(img)
     for sec in img.sections:
         if not sec.executable or not sec.data:
             continue
@@ -349,6 +409,15 @@ def find_string_xrefs_multi(
                 pass
             offset += take
             scanned += take
+
+    # Vicinity fallback: Delphi/commercial blobs reference mid-rodata, not string start
+    for t in list(want.keys()):
+        if len(want[t]) >= max_per_target:
+            continue
+        for xr in find_rodata_vicinity_xrefs(img, t, max_hits=max_per_target - len(want[t])):
+            if any(b.get("addr") == xr.get("addr") for b in want[t]):
+                continue
+            want[t].append(xr)
     return want
 
 
