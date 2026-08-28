@@ -34,7 +34,7 @@ def mock_store():
                 {
                     "outcome": "success",
                     "verification_level": "EXECUTION_VERIFIED",
-                    "summary": "slice+unlock_apply",
+                    "summary": "slice+apply_plan",
                     "strategies_json": '[{"tool": "argus_slice", "ok": true}]',
                     "cost_steps": 5,
                 },
@@ -68,7 +68,7 @@ VALID_CASE = {
     "protection": "stripped",
     "features": {"needle_score": 5},
     "task": "remove license check",
-    "task_kinds": ["unlock"],
+    "task_kinds": ["gate_transform"],
     "strategies": [{"tool": "argus_slice", "ok": True}],
     "outcome": "success",
     "verification_level": "EXECUTION_VERIFIED",
@@ -116,7 +116,7 @@ def test_reject_absolute_path(client):
 def test_search(client, mock_store):
     r = client.post(
         "/v1/search",
-        json={"query_text": "format=elf arch=x86_64 protection=stripped task=unlock", "k": 3},
+        json={"query_text": "format=elf arch=x86_64 protection=stripped task=gate_transform", "k": 3},
     )
     assert r.status_code == 200
     data = r.json()

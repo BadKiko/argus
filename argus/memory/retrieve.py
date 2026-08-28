@@ -12,7 +12,7 @@ def _query_text(binary: str, prompt: str, discover: Optional[dict] = None) -> st
     feats = extract_binary_features(binary, discover=discover)
     kinds = []
     if any(w in prompt.lower() for w in ("unlock", "license", "лиценз", "trial")):
-        kinds.append("unlock")
+        kinds.append("gate_transform")
     kinds_str = ",".join(kinds) or "general"
     return (
         f"format={feats['format']} arch={feats['arch']} protection={feats['protection']} "

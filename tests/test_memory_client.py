@@ -21,25 +21,25 @@ def test_build_case_report_from_trace():
                 {
                     "ok": True,
                     "summary": "gates=3",
-                    "unlock_plan": [{"kind": "ret_imm", "addr": "0x1000", "value": 1}],
+                    "patch_plan": [{"kind": "ret_imm", "addr": "0x1000", "value": 1}],
                     "verify": {"kind": "none"},
                 }
             ),
         },
         {
-            "tool": "argus_unlock_apply",
+            "tool": "argus_apply_plan",
             "result": json.dumps(
                 {
                     "ok": True,
                     "plan_source": "slice",
                     "slice_plan_len": 1,
-                    "verify": {"kind": "unlock_bytes", "ok": True},
-                    "unlock_plan": [{"module": "/tmp/libfoo.so", "kind": "ret_imm", "addr": "0x1000"}],
+                    "verify": {"kind": "patch_bytes", "ok": True},
+                    "patch_plan": [{"module": "/tmp/libfoo.so", "kind": "ret_imm", "addr": "0x1000"}],
                 }
             ),
         },
     ]
-    statuses = [{"id": 1, "text": "unlock license", "status": "done", "detail": "unlock_bytes ok"}]
+    statuses = [{"id": 1, "text": "unlock license", "status": "done", "detail": "patch_bytes ok"}]
     fw = str(SAMPLES / "fauxware")
     report = build_case_report(fw, "unlock license", trace, statuses, steps=5)
     assert report is not None
@@ -48,7 +48,7 @@ def test_build_case_report_from_trace():
     assert report["outcome"] == "success"
     assert report["plan_sourced"] is True
     assert report["verification_level"] == "BYTES_VERIFIED"
-    assert any(s["tool"] == "argus_unlock_apply" for s in report["strategies"])
+    assert any(s["tool"] == "argus_apply_plan" for s in report["strategies"])
 
 
 def test_memory_client_push(monkeypatch):
@@ -80,11 +80,11 @@ def test_retrieve_hints_format(monkeypatch):
         inst = MC.return_value
         inst.available = True
         inst.search_hints.return_value = [
-            {"score": 0.9, "outcome": "success", "summary": "slice+unlock", "verification_level": "EXECUTION_VERIFIED"}
+            {"score": 0.9, "outcome": "success", "summary": "slice+apply_plan", "verification_level": "EXECUTION_VERIFIED"}
         ]
         block = retrieve_hints(str(SAMPLES / "fauxware"), "unlock license")
         assert "Prior experience" in block
-        assert "slice+unlock" in block
+        assert "slice+apply_plan" in block
 
 
 def test_memory_enabled_by_default():
@@ -133,6 +133,6 @@ def test_build_user_content_includes_memory():
         "unlock",
         "/tmp/bin",
         "TASKS:\n1. unlock",
-        memory_hints="Prior experience:\n  [0.9 success] slice+unlock",
+        memory_hints="Prior experience:\n  [0.9 success] slice+apply_plan",
     )
     assert "Prior experience" in content

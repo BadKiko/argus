@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from argus.memory.features import extract_binary_features
 
-_UNLOCK_RX = re.compile(
+_GATE_SIGNAL_RX = re.compile(
     r"(unlock|license|лиценз|активац|register|unregistered|trial|serial)",
     re.IGNORECASE,
 )
@@ -23,7 +23,7 @@ _ARGUS_TOOLS = {
     "argus_lift",
     "argus_patch",
     "argus_slice",
-    "argus_unlock_apply",
+    "argus_apply_plan",
     "argus_discover",
     "argus_cfg",
     "argus_deobf",
@@ -32,8 +32,8 @@ _ARGUS_TOOLS = {
 
 def _task_kinds(task: str) -> List[str]:
     kinds: List[str] = []
-    if _UNLOCK_RX.search(task):
-        kinds.append("unlock")
+    if _GATE_SIGNAL_RX.search(task):
+        kinds.append("gate_transform")
     if _PATCH_RX.search(task):
         kinds.append("patch")
     if _LIFT_RX.search(task):
@@ -68,7 +68,7 @@ def _plan_sourced(tool_trace: List[Dict[str, Any]]) -> bool:
     if not had_slice_plan:
         return False
     for entry in tool_trace:
-        if entry.get("tool") != "argus_unlock_apply":
+        if entry.get("tool") != "argus_apply_plan":
             continue
         raw = entry.get("result")
         payload: Dict[str, Any] = {}
@@ -99,7 +99,7 @@ def _slice_plan_len(tool_trace: List[Dict[str, Any]]) -> Tuple[bool, int]:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-        plan = payload.get("unlock_plan") or (payload.get("evidence") or {}).get("unlock_plan") or []
+        plan = payload.get("patch_plan") or (payload.get("evidence") or {}).get("patch_plan") or []
         if isinstance(plan, list):
             best = max(best, len(plan))
     return best > 0, best
@@ -120,14 +120,14 @@ def _verification_level(tool_trace: List[Dict[str, Any]], task_statuses: List[Di
         if verify.get("ok") is not True:
             continue
         kind = verify.get("kind") or ""
-        if kind == "unlock_composite":
-            behavior = verify.get("unlock_behavior") or {}
+        if kind == "patch_composite":
+            behavior = verify.get("patch_behavior") or {}
             if behavior.get("ran") and behavior.get("ok") is True:
                 return "BEHAVIOR_VERIFIED"
-            bytes_v = verify.get("unlock_bytes") or {}
+            bytes_v = verify.get("patch_bytes") or {}
             if bytes_v.get("ok") is True:
                 return "BYTES_VERIFIED"
-        if kind == "unlock_bytes":
+        if kind == "patch_bytes":
             return "BYTES_VERIFIED"
         cert = payload.get("certificate") or {}
         if isinstance(cert, dict) and cert.get("proven"):
@@ -141,8 +141,8 @@ def _outcome(task_statuses: List[Dict[str, Any]], tool_trace: List[Dict[str, Any
     if not task_statuses:
         return "incomplete"
     if all(s.get("status") == "done" for s in task_statuses):
-        unlock_task = any("unlock" in _task_kinds(s.get("text") or "") for s in task_statuses)
-        if unlock_task and not _plan_sourced(tool_trace):
+        gate_task = any("gate_transform" in _task_kinds(s.get("text") or "") for s in task_statuses)
+        if gate_task and not _plan_sourced(tool_trace):
             return "incomplete"
         return "success"
     if any(s.get("status") == "failed" for s in task_statuses):
@@ -176,7 +176,7 @@ def _modules_patched(tool_trace: List[Dict[str, Any]]) -> List[str]:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-        plan = payload.get("unlock_plan") or []
+        plan = payload.get("patch_plan") or []
         for s in plan:
             mod = s.get("module")
             if mod:

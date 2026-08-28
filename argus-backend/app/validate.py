@@ -17,7 +17,7 @@ ALLOWED_TOOLS: Set[str] = {
     "argus_lift",
     "argus_patch",
     "argus_slice",
-    "argus_unlock_apply",
+    "argus_apply_plan",
     "argus_discover",
     "argus_cfg",
     "argus_deobf",
@@ -54,12 +54,12 @@ def validate_case_report(report: CaseReport) -> None:
     if report.arch not in ("x86_64", "x86", "aarch64", "arm64", "arm", "unknown"):
         raise HTTPException(status_code=422, detail="invalid arch")
 
-    if report.outcome.value == "success" and "unlock" in report.task_kinds:
+    if report.outcome.value == "success" and "gate_transform" in report.task_kinds:
         plan_sourced = getattr(report, "plan_sourced", None)
         if plan_sourced is None:
             plan_sourced = report.features.get("plan_sourced")
         if plan_sourced is False:
             raise HTTPException(
                 status_code=422,
-                detail="unlock success requires plan_sourced=true (slice unlock_plan + unlock_apply)",
+                detail="gate_transform success requires plan_sourced=true (slice patch_plan + apply_plan)",
             )

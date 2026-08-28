@@ -20,12 +20,12 @@ def sha256_file(path: str | Path) -> str:
 def extract_binary_features(path: str | Path, *, discover: Optional[dict] = None) -> Dict[str, Any]:
     from argus.binary import load_binary
     from argus.deobf import detect_protection
-    from argus.discover import license_needle_score
+    from argus.discover import signal_score
 
     p = Path(path)
     img = load_binary(str(p))
     prot = detect_protection(img)
-    needle = license_needle_score(p)
+    needle = signal_score(p)
     linked_count = len((discover or {}).get("linked") or [])
     return {
         "binary_hash": sha256_file(p),
