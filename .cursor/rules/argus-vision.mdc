@@ -1,0 +1,100 @@
+---
+description: Argus vision, architecture, and development principles (universal binary RE agent)
+alwaysApply: true
+---
+
+# Argus — vision and development rules
+
+Argus is a research framework for **autonomous analysis, understanding, and transformation of binary programs**. It is **not** a license cracker, APK tool, or Ghidra wrapper.
+
+## Core philosophy
+
+> Argus should understand **programs**, not specific file formats or vendor workflows.
+
+- Formats (PE, ELF, Mach-O, DEX, APK, IPA, …) are **container adapters**, not the core model.
+- Do **not** hardcode pipelines like "license unlock only" or "change button color only".
+- Provide **atomic capabilities**; the AI/reasoner composes pipelines per task.
+- No artificial product modes named after one use case (avoid `unlock_*`, `license_*` in **new** APIs; legacy names may remain until renamed).
+
+## Truth model
+
+> **LLM proposes. Deterministic tooling executes. Math/runtime verifies.**
+
+- Never treat model prose as success ground truth.
+- Task completion requires **tool evidence** and verification metadata.
+- Verification levels (low → high): `UNKNOWN` → `USER_REPORTED` → `EXECUTION_VERIFIED` → `BEHAVIOR_VERIFIED` → `FORMALLY_VERIFIED`.
+- User thumbs-up alone is not ground truth.
+
+## Architecture (target)
+
+```
+User task → AI/Reasoner → Task Planner → Tool selection + Memory/RAG
+         → Atomic operations (static / dynamic / formal backends)
+         → Argus IR (future) → Transform → Rebuild/Patch → Verify → Memory
+```
+
+Backends (Capstone, Unicorn, Z3, Apktool, …) sit **behind** abstract ops, not as the product surface.
+
+Examples of atomic capabilities (names illustrative):
+
+- `artifact.inspect`, `native.disassemble`, `native.xrefs`, `native.strings`
+- `analysis.find_callers`, `analysis.cfg`
+- `transform.patch_bytes`, `transform.patch_instruction`
+- `runtime.trace`, `symbolic.solve`
+- `artifact.rebuild`, `artifact.verify`
+
+The agent combines primitives; the user does not pick a fixed pipeline upfront.
+
+## Unknown artifacts
+
+Do not stop at `unsupported`. Flow:
+
+```
+unknown → format/structure discovery → hypothesized layout → Argus IR → analyze → transform → verify → store experience
+```
+
+Use static hints first; add dynamic observation when needed (mappings, branches, syscalls).
+
+## Memory and planning
+
+- Persistent **structured case memory** (features, strategies, outcomes, failures, cost, verification).
+- Store **successes and failures** (timeouts, regressions, wrong pivots).
+- Retrieval informs planning; planner scores strategies by success × confidence / cost.
+- Memory hints are **not** ground truth — still require tool verify.
+- Prefer embeddings + vector DB + RAG before fine-tuning.
+
+## Naming and API guidelines (when adding code)
+
+| Avoid (legacy/task-specific) | Prefer (neutral) |
+|------------------------------|------------------|
+| `license_slice`, `unlock_plan` | `gate_scan`, `patch_plan` |
+| `unlock_apply` | `apply_plan`, `patch_apply` |
+| `license_needle_score` | `signal_score`, `heuristic_score` |
+| intent mode `LICENSE` only | task routing **hints**, not hard modes |
+| "unlock", "crack", "bypass license" in user-facing design | "transform", "verify behavior", "patch plan" |
+
+Do not add new vendor-specific recipes (Beyond Compare, LexActivator, …). Keep heuristics generic.
+
+## Implementation constraints
+
+- **Never patch the user's original binary** — workspace copy only.
+- Discover/sibling scans use **install directory**, not `.cache/argus/workspaces`.
+- Agent must not stop on empty plan — pivot tools/modules/research until verified or exhausted.
+- Tests should cover real behavior (verify paths), not "model said ok".
+- Minimize scope: small correct diffs; match existing code style.
+
+## Certificates (direction)
+
+After significant transforms, aim for machine-readable certificates: hash, transformation, behavior checked, solver/runtime/regression results, verification level.
+
+## Long-term metric
+
+Optimize **unseen binary success rate**: use past cases to solve new artifacts, not memorize one binary.
+
+## What Argus is not
+
+- Not `Ghidra + LLM`.
+- Not a single-format tool.
+- Not an "AI cracker" product.
+
+Build an **agentic binary laboratory with persistent experience and verification**.
