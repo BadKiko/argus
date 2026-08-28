@@ -265,6 +265,59 @@ def sibling_binaries(primary: Path, *, limit: int = 40) -> List[Path]:
     return out
 
 
+def is_workspace_cache_path(path: Path | str) -> bool:
+    s = str(path).replace("\\", "/")
+    return "/.cache/argus/workspaces/" in s or "/.argus-work/" in s
+
+
+def resolve_link_base(primary: str | Path, install_root: Optional[str] = None) -> Path:
+    """Map workspace work copy back to install-dir binary for sibling/linked scans."""
+    prim = Path(primary).resolve()
+    if install_root and is_workspace_cache_path(prim):
+        alt = Path(install_root) / prim.name
+        if alt.is_file():
+            return alt.resolve()
+    return prim
+
+
+def merge_install_discover(
+    info: Dict[str, Any],
+    install_root: str,
+    *,
+    binary: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Attach install-dir candidates/linked (work copy lives in cache, modules do not)."""
+    root = Path(install_root)
+    if not root.is_dir():
+        return info
+    link = resolve_link_base(binary or info.get("primary") or "", install_root)
+    extra = discover_targets("", root=str(root), binary=str(link) if link.is_file() else None)
+    out = dict(info)
+    out["install_dir"] = str(root)
+    by_path: Dict[str, Dict[str, Any]] = {}
+    for c in (out.get("candidates") or []) + (extra.get("candidates") or []):
+        p = c.get("path")
+        if p:
+            by_path[p] = c
+    out["candidates"] = sorted(
+        by_path.values(),
+        key=lambda x: (-int(x.get("score") or 0), str(x.get("name") or "").lower()),
+    )[:20]
+    by_link: Dict[str, Dict[str, Any]] = {}
+    for m in (out.get("linked") or []) + (extra.get("linked") or []):
+        p = m.get("path")
+        if p:
+            by_link[p] = m
+    out["linked"] = sorted(
+        by_link.values(),
+        key=lambda x: (-int(x.get("score") or 0), str(x.get("name") or "").lower()),
+    )[:12]
+    scored = [c for c in out["candidates"] if int(c.get("score") or 0) > 0]
+    if scored:
+        out["install_modules_hint"] = [c["path"] for c in scored[:8]]
+    return out
+
+
 def widen_modules(
     primary: str | Path,
     *,
@@ -276,9 +329,10 @@ def widen_modules(
     When primary/linked slice is empty: expand search to nearby binaries
     (same-dir ELF/PE, linked deps, shallow scan of install dir), ranked by needles.
     """
-    prim = Path(primary).resolve()
+    prim = resolve_link_base(primary, root)
     tried_set: Set[str] = {str(Path(t).resolve()) for t in (tried or []) if t}
     tried_set.add(str(prim))
+    tried_set.add(str(Path(primary).resolve()))
 
     pool: List[Path] = []
     pool.extend(sibling_binaries(prim, limit=40))
@@ -332,6 +386,35 @@ def linked_modules(primary: Path | str, *, limit: int = 16) -> List[Path]:
     return found
 
 
+def _is_library_name(name: str) -> bool:
+    n = name.lower()
+    return n.startswith("lib") or ".so" in n or n.endswith((".dll", ".dylib"))
+
+
+def _pick_primary(ranked: Sequence[Tuple[int, Path]]) -> Optional[Path]:
+    """Prefer main app binary over .so/.dll when license scores are close."""
+    if not ranked:
+        return None
+    top_score = ranked[0][0]
+    if top_score <= 0:
+        return ranked[0][1]
+    threshold = max(1, int(top_score * 0.85))
+    pool = [(sc, p) for sc, p in ranked if sc >= threshold]
+
+    def sort_key(item: Tuple[int, Path]) -> Tuple[int, int, int, str]:
+        sc, p = item
+        name = p.name
+        is_lib = _is_library_name(name)
+        try:
+            app_like = os.access(p, os.X_OK) and not is_lib
+        except OSError:
+            app_like = False
+        return (1 if app_like else 0, sc, -1 if is_lib else 0, name.lower())
+
+    pool.sort(key=sort_key, reverse=True)
+    return pool[0][1]
+
+
 def discover_targets(
     prompt: str = "",
     *,
@@ -348,7 +431,7 @@ def discover_targets(
     seeds: List[Path] = []
 
     if binary and Path(binary).is_file():
-        seeds.append(Path(binary).resolve())
+        seeds.append(resolve_link_base(binary, root).resolve())
 
     for raw in extract_paths_from_text(prompt):
         p = Path(raw)
@@ -392,10 +475,12 @@ def discover_targets(
             }
         )
 
-    primary = candidates[0]["path"] if candidates else None
+    picked = _pick_primary(ranked)
+    primary = str(picked) if picked else None
     linked: List[Dict[str, Any]] = []
-    if primary:
-        for mod in linked_modules(primary, limit=max_linked * 2):
+    link_base = resolve_link_base(primary, root) if primary else None
+    if link_base and link_base.is_file():
+        for mod in linked_modules(link_base, limit=max_linked * 2):
             sc = license_needle_score(mod)
             linked.append({"path": str(mod), "score": sc, "name": Path(mod).name})
         linked.sort(key=lambda x: (-int(x["score"]), x["name"]))
