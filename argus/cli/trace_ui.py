@@ -18,7 +18,7 @@ _TOOL_STYLE = {
     "argus_slice": "cyan",
     "argus_find": "blue",
     "argus_patch": "magenta",
-    "argus_unlock_apply": "green",
+    "argus_apply_plan": "green",
     "argus_discover": "yellow",
     "argus_lift": "white",
     "argus_ai": "bright_blue",
@@ -52,8 +52,8 @@ def describe_tool_call(name: str, args: Dict[str, Any]) -> str:
         kind = args.get("kind") or "patch"
         at = _addr(args)
         return f"{kind}" + (f" {at}" if at else "")
-    if name == "argus_unlock_apply":
-        return "unlock apply"
+    if name == "argus_apply_plan":
+        return "apply plan"
     if name == "argus_discover":
         return "discover DLL/SO"
     if name == "argus_lift":
@@ -68,7 +68,7 @@ def describe_tool_call(name: str, args: Dict[str, Any]) -> str:
 def describe_tool_result(name: str, args: Dict[str, Any], payload: Dict[str, Any]) -> str:
     ok = payload.get("ok")
     if name == "argus_slice":
-        plan = payload.get("unlock_plan") or (payload.get("evidence") or {}).get("unlock_plan") or []
+        plan = payload.get("patch_plan") or (payload.get("evidence") or {}).get("patch_plan") or []
         return f"plan={len(plan)}"
     if name == "argus_find":
         hits = (payload.get("evidence") or {}).get("hits") or payload.get("hits") or []
@@ -80,7 +80,7 @@ def describe_tool_result(name: str, args: Dict[str, Any], payload: Dict[str, Any
     if name == "argus_discover":
         linked = payload.get("linked") or (payload.get("evidence") or {}).get("linked") or []
         return f"{len(linked)} linked" if linked else "scan"
-    if name == "argus_unlock_apply":
+    if name == "argus_apply_plan":
         v = (payload.get("verify") or {}).get("ok")
         return "verified" if v else "verify fail"
     if ok is True:

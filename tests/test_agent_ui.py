@@ -57,7 +57,7 @@ def test_user_feedback_on_failure():
     report = build_case_report(
         str(fw),
         "unlock",
-        [{"tool": "argus_slice", "result": {"ok": True, "unlock_plan": []}}],
+        [{"tool": "argus_slice", "result": {"ok": True, "patch_plan": []}}],
         [{"id": 1, "text": "unlock", "status": "incomplete", "detail": "empty plan"}],
         outcome_override="failed",
         user_feedback="Go away still prints",

@@ -66,7 +66,7 @@ def test_find_ui_query_does_not_prefer_unlock_stubs():
 
     assert _query_intent("Groot Pro") == "ui"
     assert _query_intent("заголовок и days left") == "ui"
-    assert _query_intent("убери проверку лицензии") == "unlock"
+    assert _query_intent("убери проверку лицензии") == "gate_transform"
     path = str(SAMPLES / "fauxware")
     data = find_in_binary(path, "Welcome title")
     assert "replace_string" in (data.get("next_hint") or "") or "UI/text" in (data.get("next_hint") or "")
@@ -118,12 +118,12 @@ def test_dispatch_patch_always_true_writes_file(tmp_path):
 def test_tools_include_find_and_new_patch_kinds():
     names = {t["function"]["name"] for t in ARGUS_TOOLS}
     assert "argus_find" in names
-    assert "argus_unlock_apply" in names
+    assert "argus_apply_plan" in names
     assert "argus_slice" in names
     patch = next(t for t in ARGUS_TOOLS if t["function"]["name"] == "argus_patch")
     kinds = patch["function"]["parameters"]["properties"]["kind"]["enum"]
     assert "nop_bytes" in kinds and "ret_imm" in kinds and "force_branch" in kinds
-    assert "unlock_license" not in kinds
+    assert "gate_transform" not in kinds
 
 
 def test_ask_ret_imm_and_default_patched_suffix(tmp_path):
@@ -218,8 +218,8 @@ def test_ret_imm_not_unlock_license_in_patch_kinds():
     kinds = patch["function"]["parameters"]["properties"]["kind"]["enum"]
     assert "ret_imm" in kinds
     assert "replace_string" in kinds
-    assert "unlock_license" not in kinds
-    assert not hasattr(PatchKind, "UNLOCK_LICENSE")
+    assert "gate_transform" not in kinds
+    assert not hasattr(PatchKind, "GATE_TRANSFORM")
 
 
 def test_nl_unlock_maps_to_ret_imm():

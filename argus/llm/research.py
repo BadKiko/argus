@@ -118,7 +118,7 @@ def build_research_brief(
     if intent.value == "password":
         lines.extend(
             [
-                "  • argus_slice → argus_unlock_apply (unlock_plan)",
+                "  • argus_slice → argus_apply_plan (patch_plan)",
                 "  • или argus_ai / argus_solve для пароля",
                 "  • bypass: behavior verify на patched copy",
             ]
@@ -128,7 +128,7 @@ def build_research_brief(
             [
                 "  • argus_analyze + argus_find + argus_slice",
                 "  • argus_discover для sibling DLL/SO",
-                "  • argus_unlock_apply только с slice plan",
+                "  • argus_apply_plan только с slice plan",
             ]
         )
     lines.append("  • argus_research(query=...) для сводки + web hints")

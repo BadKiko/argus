@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Lightweight task intent routing: license unlock vs password crackme vs UI patch."""
+"""Lightweight task intent routing: gate transform vs password crackme vs UI patch."""
 
 import re
 from enum import Enum
@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from argus.binary import load_binary
 
-_LICENSE_RX = re.compile(
+_GATE_SIGNAL_RX = re.compile(
     r"(unlock|license|лиценз|активац|register|unregistered|trial|serial|"
     r"убери\s+про|remove\s+licen|bypass\s+licen|crack\s+licen)",
     re.IGNORECASE,
@@ -27,7 +27,7 @@ _UI_RX = re.compile(
 
 
 class TaskKind(Enum):
-    UNLOCK_LICENSE = "unlock_license"
+    GATE_TRANSFORM = "gate_transform"
     PASSWORD = "password"
     PATCH_UI = "patch_ui"
     GENERAL = "general"
@@ -43,7 +43,7 @@ def classify_task_intent(
     if not text:
         return TaskKind.GENERAL
 
-    has_license_words = bool(_LICENSE_RX.search(text))
+    has_license_words = bool(_GATE_SIGNAL_RX.search(text))
     has_password_words = bool(_PASSWORD_RX.search(text))
     has_ui_words = bool(_UI_RX.search(text))
 
@@ -64,7 +64,7 @@ def classify_task_intent(
         return TaskKind.PATCH_UI
 
     if has_license_words or binary_signals.get("license_strings"):
-        return TaskKind.UNLOCK_LICENSE
+        return TaskKind.GATE_TRANSFORM
 
     if has_password_words or binary_signals.get("password_crackme"):
         return TaskKind.PASSWORD
@@ -145,7 +145,7 @@ def is_bypass_password_task(text: str) -> bool:
     return bool(_BYPASS_PASSWORD_RX.search(text or ""))
 
 
-_BYPASS_LICENSE_RX = re.compile(
+_BYPASS_GATE_SIGNAL_RX = re.compile(
     r"(люб\w*\s+ключ|any\s+key|accept\s+any\s+(?:key|license)|"
     r"люб\w*\s+лиценз|люб\w*\s+serial|any\s+license\s+key)",
     re.IGNORECASE,
@@ -153,7 +153,7 @@ _BYPASS_LICENSE_RX = re.compile(
 
 
 def is_bypass_license_task(text: str) -> bool:
-    return bool(_BYPASS_LICENSE_RX.search(text or ""))
+    return bool(_BYPASS_GATE_SIGNAL_RX.search(text or ""))
 
 
 def routing_hint(
@@ -171,24 +171,24 @@ def routing_hint(
             )
         if is_bypass_password_task(task_text or ""):
             return (
-                "Task routing: BYPASS password (accept any) — argus_slice → argus_unlock_apply "
-                "by unlock_plan; ret_imm on authenticate alone may fail behavior verify."
+                "Task routing: BYPASS password (accept any) — argus_slice → argus_apply_plan "
+                "by patch_plan; ret_imm on authenticate alone may fail behavior verify."
             )
         return (
-            "Task routing: PASSWORD crackme (not license unlock) — use argus_ai/ask password "
-            "path or patch authenticate; do NOT use argus_unlock_apply for license."
+            "Task routing: PASSWORD crackme (not gate transform) — use argus_ai/ask password "
+            "path or patch authenticate; do NOT use argus_apply_plan for license gates."
         )
-    if kind == TaskKind.UNLOCK_LICENSE:
+    if kind == TaskKind.GATE_TRANSFORM:
         if is_bypass_license_task(task_text or ""):
             return (
-                "Task routing: BYPASS license key (accept any key) — argus_slice on work binary "
-                "(install-dir modules via modules=[] if plan=0), then ONE argus_unlock_apply "
-                "from unlock_plan only; discover root = install dir, NOT workspace cache."
+                "Task routing: BYPASS gate signal (accept any key) — argus_slice on work binary "
+                "(install-dir modules via modules=[] if plan=0), then ONE argus_apply_plan "
+                "from patch_plan only; discover root = install dir, NOT workspace cache."
             )
         return (
-            "Task routing: LICENSE — require argus_slice with non-empty unlock_plan, "
-            "then ONE argus_unlock_apply (no custom steps unless copied from slice JSON)."
+            "Task routing: GATE TRANSFORM — require argus_slice with non-empty patch_plan, "
+            "then ONE argus_apply_plan (no custom steps unless copied from slice JSON)."
         )
     if kind == TaskKind.PATCH_UI:
-        return "Task routing: UI/patch — use argus_patch replace_string or weak UI xref; not unlock_apply."
+        return "Task routing: UI/patch — use argus_patch replace_string or weak UI xref; not apply_plan."
     return ""

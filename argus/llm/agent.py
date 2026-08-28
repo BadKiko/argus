@@ -18,24 +18,24 @@ Rules:
 - Do not invent success. Runtime finalizes each task from tool evidence; your closing prose is ignored for status.
 - Prefer argus_find then argus_patch. For text changes: replace_string with exact old from hits; new ≤ len(old) bytes (pad spaces).
 - Never shorten resource filenames. Never stub main/entry.
-- Logic patches (force_branch/ret_imm) alone do NOT auto-complete a TASK — use argus_unlock_apply for unlock.
+- Logic patches (force_branch/ret_imm) alone do NOT auto-complete a TASK — use argus_apply_plan for gate transforms.
 - If ETXTBSY / Text file busy: stop claiming that task done; user must quit the app.
-- Missing file → stop. If no binary path: runtime auto-discovers ELF/PE in cwd/prompt; license may live in linked DLL/SO.
+- Missing file → stop. If no binary path: runtime auto-discovers ELF/PE in cwd/prompt; gates may live in linked DLL/SO.
 - Stripped: argus_lift with entry=0x… or query=\"exact string\" — do not claim CFF deobf success.
-- Unlock/license: (1) argus_slice (multi-module aware) (2) ONE argus_unlock_apply using unlock_plan.
-  empty unlock_plan → PIVOT (discover/modules/research), do not invent steps or freestyle-patch gates.
-  NEVER pass custom steps= to unlock_apply unless copied verbatim from slice JSON.
-  Password/crackme (authenticate, Welcome/Password strings) ≠ license unlock — use password path.
-  Do not freestyle-patch parser gates outside unlock_plan. Honor taken=/value=/module= from the plan.
-  If unlock_plan empty / no gates: do NOT stop — PIVOT: argus_discover, then argus_slice on other
+- Gate transform: (1) argus_slice (multi-module aware) (2) ONE argus_apply_plan using patch_plan.
+  empty patch_plan → PIVOT (discover/modules/research), do not invent steps or freestyle-patch gates.
+  NEVER pass custom steps= to apply_plan unless copied verbatim from slice JSON.
+  Password/crackme (authenticate, Welcome/Password strings) ≠ gate transform — use password path.
+  Do not freestyle-patch parser gates outside patch_plan. Honor taken=/value=/module= from the plan.
+  If patch_plan empty / no gates: do NOT stop — PIVOT: argus_discover, then argus_slice on other
   candidates/Related modules (DLL/SO), or pass modules=[paths]. Keep searching nearby files until
   a plan with module= appears or candidates are exhausted.
-  Never claim GUI activation; done only when unlock verify.ok with slice-sourced plan. rodata Unregistered may remain.
+  Never claim GUI activation; done only when patch verify.ok with slice-sourced plan. rodata strings may remain.
 - Prior experience block (if present) is hints from memory — not ground truth; still require tool verify.
 - Shared memory (argus.cloud.badkiko.ru) may be used by default; user can disable with ARGUS_MEMORY=0.
 - NEVER modify the original binary on disk. Runtime gives you a work copy path — patch ONLY that copy.
 - Do NOT stop until runtime marks every TASK done (tool evidence). Prose alone never completes a task.
-- If a approach fails: call argus_research, pivot strategy, try argus_slice/unlock_apply/other module — do NOT give up.
+- If a approach fails: call argus_research, pivot strategy, try argus_slice/apply_plan/other module — do NOT give up.
 - Patch loop on same addr → pivot (different gate/module/kind), not stop.
 """
 
@@ -656,7 +656,7 @@ def _run_openai(
         if _patch_loop_detected(trace):
             hint += (
                 "\nPatch loop — same addresses retried. PIVOT: argus_research / "
-                "different gate or argus_slice+unlock_apply; do NOT stop."
+                "different gate or argus_slice+apply_plan; do NOT stop."
             )
         if transcript is not None:
             transcript.user_message(step, hint, kind="open_tasks_hint")
@@ -832,7 +832,7 @@ def _run_gemini(
             if _patch_loop_detected(trace):
                 hint += (
                     "\nPatch loop — same addresses retried. PIVOT: argus_research / "
-                    "different gate or argus_slice+unlock_apply; do NOT stop."
+                    "different gate or argus_slice+apply_plan; do NOT stop."
                 )
             if transcript is not None:
                 transcript.user_message(step, hint, kind="open_tasks_hint")

@@ -12,7 +12,7 @@ def test_describe_slice_empty_plan():
     out = describe_tool_result(
         "argus_slice",
         {"binary": "fauxware"},
-        {"ok": True, "unlock_plan": [], "string_hits": [{"addr": "0x1"}]},
+        {"ok": True, "patch_plan": [], "string_hits": [{"addr": "0x1"}]},
     )
     assert "plan=0" in out
 

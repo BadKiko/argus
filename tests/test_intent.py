@@ -22,7 +22,7 @@ def test_fauxware_remove_license_routes_password():
 
 def test_license_prompt_routes_unlock():
     kind = classify_task_intent("bypass trial activation serial")
-    assert kind == TaskKind.UNLOCK_LICENSE
+    assert kind == TaskKind.GATE_TRANSFORM
 
 
 def test_ui_replace_routes_patch():

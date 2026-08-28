@@ -119,8 +119,8 @@ ARGUS_TOOLS: List[dict] = [
         "argus_patch",
         "Write a patched binary. Always pass for_task=<TASKS id>. "
         "replace_string: old=exact substring, new≤len(old). "
-        "For license unlock prefer argus_slice then argus_unlock_apply (not freestyle gates). "
-        "Freestyle logic patch never completes unlock tasks. "
+        "For gate transforms prefer argus_slice then argus_apply_plan (not freestyle gates). "
+        "Freestyle logic patch never completes gate-transform tasks. "
         "ETXTBSY: quit the running app. Never stub main/entry.",
         {
             "binary": {"type": "string"},
@@ -167,7 +167,7 @@ ARGUS_TOOLS: List[dict] = [
         "argus_discover",
         "Find the target ELF/PE and related DLL/SO modules when path is missing or unclear, "
         "or when a prior slice found nothing — re-rank candidates across the install dir. "
-        "Pass for_task. Prefer before unlock if no Binary path or after empty unlock_plan.",
+        "Pass for_task. Prefer before gate scan if no Binary path or after empty patch_plan.",
         {
             "prompt": {"type": "string", "description": "User task text (may contain paths)"},
             "root": {"type": "string", "description": "Directory to scan (default cwd)"},
@@ -177,11 +177,11 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_slice",
-        "License unlock discovery (universal): validate/UI strings → xrefs → "
-        "gate_candidates + unlock_plan. Scans linked DLL/SO when multi=true; auto-widens to "
+        "Gate scan (universal): validate/UI strings → xrefs → "
+        "gate_candidates + patch_plan. Scans linked DLL/SO when multi=true; auto-widens to "
         "nearby binaries if primary has no plan. If still empty: pivot via argus_discover. "
-        "Always call before unlock. Then argus_unlock_apply. Pass for_task. "
-        "If unlock_plan is empty: STOP — do not invent steps; pivot modules or use password path.",
+        "Always call before apply_plan. Then argus_apply_plan. Pass for_task. "
+        "If patch_plan is empty: STOP — do not invent steps; pivot modules or use password path.",
         {
             "binary": {"type": "string"},
             "query": {"type": "string", "description": "Optional extra phrase e.g. invalid license"},
@@ -198,11 +198,11 @@ ARGUS_TOOLS: List[dict] = [
         ["binary"],
     ),
     openai_tool(
-        "argus_unlock_apply",
-        "Apply unlock_plan in order (ret_imm/force_branch) per module, then "
+        "argus_apply_plan",
+        "Apply patch_plan in order (ret_imm/force_branch) per module, then "
         "composite verify (bytes + behavior smoke when available). "
-        "NEVER pass custom steps= unless copied verbatim from argus_slice unlock_plan JSON. "
-        "Omit steps= to auto-slice. Prefer this over freestyle argus_patch for license unlock. Pass for_task.",
+        "NEVER pass custom steps= unless copied verbatim from argus_slice patch_plan JSON. "
+        "Omit steps= to auto-slice. Prefer this over freestyle argus_patch for gate transforms. Pass for_task.",
         {
             "binary": {"type": "string"},
             "output": {"type": "string", "description": "Patched primary output path (default binary.patched)"},
@@ -214,7 +214,7 @@ ARGUS_TOOLS: List[dict] = [
             },
             "steps": {
                 "type": "array",
-                "description": "unlock_plan steps from argus_slice (may include module=)",
+                "description": "patch_plan steps from argus_slice (may include module=)",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -274,7 +274,7 @@ def _truncate(obj: Any, limit: int = 10000) -> str:
         "hits",
         "gate_candidates",
         "patch_candidates",
-        "unlock_plan",
+        "patch_plan",
         "applied",
         "evidence",
         "suggested_stubs",
@@ -396,7 +396,7 @@ def _weak_ui_xref_at(path: str, addr: Optional[int]) -> bool:
 
 def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
     """Execute one Argus tool; return JSON/text for the model."""
-    from argus.llm.session import get_session, record_slice_result
+    from argus.llm.session import get_session, record_gate_scan_result
 
     arguments = dict(arguments or {})
     sess = get_session()
@@ -408,7 +408,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             work_binary=sess.work_binary,
             original_binary=sess.original_binary,
         )
-        if name in ("argus_patch", "argus_unlock_apply", "argus_deobf"):
+        if name in ("argus_patch", "argus_apply_plan", "argus_deobf"):
             for key in ("binary", "output", "patch"):
                 err = assert_not_original_target(arguments.get(key), sess.original_binary)
                 if err:
@@ -422,21 +422,21 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
 
     sess = get_session()
     if (
-        sess.strict_unlock
-        and name == "argus_unlock_apply"
+        sess.strict_plan
+        and name == "argus_apply_plan"
         and arguments.get("steps")
-        and sess.last_slice_plan_len == 0
+        and sess.last_patch_plan_len == 0
     ):
         raw = _envelope(
             ok=False,
-            summary="blocked: argus_unlock_apply with custom steps after empty unlock_plan",
+            summary="blocked: argus_apply_plan with custom steps after empty patch_plan",
             evidence={
-                "error": "strict_unlock",
+                "error": "strict_plan",
                 "plan_source": "rejected_model",
                 "slice_plan_len": 0,
             },
-            verify={"kind": "unlock_bytes", "ok": False, "detail": "steps not from unlock_plan"},
-            next_hint="argus_slice must return non-empty unlock_plan before unlock_apply with steps=",
+            verify={"kind": "patch_bytes", "ok": False, "detail": "steps not from patch_plan"},
+            next_hint="argus_slice must return non-empty patch_plan before apply_plan with steps=",
             tool=name,
         )
         return _inject_task_fields(raw, for_task=for_task, warning=missing_task_warn)
@@ -485,14 +485,14 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             addr = _parse_addr(arguments.get("addr"))
             if _weak_ui_xref_at(arguments.get("binary") or "", addr):
                 evidence_extra["weak_ui_xref"] = True
-            evidence_extra["blocks_unlock_done"] = True
-            evidence_extra["reason"] = "freestyle logic patch — not unlock_plan"
+            evidence_extra["blocks_gate_done"] = True
+            evidence_extra["reason"] = "freestyle logic patch — not patch_plan"
 
     if name == "argus_slice":
         try:
             slice_payload = json.loads(raw)
-            plan = slice_payload.get("unlock_plan") or []
-            record_slice_result(arguments.get("binary") or "", plan)
+            plan = slice_payload.get("patch_plan") or []
+            record_gate_scan_result(arguments.get("binary") or "", plan)
         except json.JSONDecodeError:
             pass
 
@@ -583,7 +583,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         from argus.find import find_in_binary
 
         found = find_in_binary(arguments["binary"], arguments.get("query"))
-        # Put unlock guidance first — full hits often truncate past gate_symbols
+        # Put gate-scan guidance first — full hits often truncate past gate_symbols
         slim = {
             "ok": found.get("ok", True),
             "summary": found.get("summary"),
@@ -738,7 +738,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             ),
         )
         env = _ask_to_envelope(r)
-        # Logic patches: remind to use unlock_plan verify — string absence is NOT success
+        # Logic patches: remind to use patch_plan verify — string absence is NOT success
         if r.ok and r.patched_path and kind.value in (
             "ret_imm",
             "force_branch",
@@ -751,8 +751,8 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
 
                 prev = _json.loads(env) if isinstance(env, str) else {}
                 note = (
-                    "logic patch applied — for license unlock prefer argus_unlock_apply "
-                    "(unlock_bytes verify). rodata Unregistered strings are NOT proof of lock/unlock."
+                    "logic patch applied — for gate transforms prefer argus_apply_plan "
+                    "(patch_bytes verify). rodata strings are NOT proof of behavior change."
                 )
                 return _envelope(
                     ok=bool(r.ok),
@@ -808,7 +808,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         )
 
     if name == "argus_slice":
-        from argus.find_slice import license_slice, license_slice_modules
+        from argus.find_slice import gate_scan, gate_scan_modules
 
         binary = arguments["binary"]
         query = arguments.get("query")
@@ -817,9 +817,9 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             multi = True
         modules = arguments.get("modules")
         if multi:
-            d = license_slice_modules(binary, modules=modules, query=query, auto_widen=True)
+            d = gate_scan_modules(binary, modules=modules, query=query, auto_widen=True)
         else:
-            d = license_slice(binary, query)
+            d = gate_scan(binary, query)
         return _truncate(
             {
                 "ok": True,
@@ -830,11 +830,11 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 "widened_from": d.get("widened_from") or [],
                 "per_module": d.get("per_module") or [],
                 "gate_candidates": d.get("gate_candidates") or [],
-                "unlock_plan": d.get("unlock_plan") or [],
+                "patch_plan": d.get("patch_plan") or [],
                 "string_hits": d.get("string_hits") or [],
                 "evidence": {
                     "gate_candidates": d.get("gate_candidates") or [],
-                    "unlock_plan": d.get("unlock_plan") or [],
+                    "patch_plan": d.get("patch_plan") or [],
                     "string_hits": d.get("string_hits") or [],
                     "modules": d.get("modules") or [binary],
                     "pivoted": d.get("pivoted"),
@@ -844,16 +844,16 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             limit=14000,
         )
 
-    if name == "argus_unlock_apply":
+    if name == "argus_apply_plan":
         from argus.discover import discover_targets
-        from argus.unlock import unlock_apply
+        from argus.apply_plan import apply_plan
 
         binary = arguments["binary"]
         modules = arguments.get("modules")
         if not arguments.get("steps") and modules is None:
             disc = discover_targets("", binary=binary)
             modules = [m["path"] for m in (disc.get("linked") or [])] or None
-        d = unlock_apply(
+        d = apply_plan(
             binary,
             output=arguments.get("output"),
             steps=arguments.get("steps"),
@@ -869,10 +869,10 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 "slice_plan_len": d.get("slice_plan_len"),
                 "patched_path": d.get("patched_path"),
                 "patched_paths": d.get("patched_paths") or {},
-                "unlock_plan": d.get("unlock_plan") or [],
+                "patch_plan": d.get("patch_plan") or [],
                 "applied": d.get("applied") or [],
                 "verify": d.get("verify")
-                or {"kind": "unlock_bytes", "ok": False, "detail": "missing"},
+                or {"kind": "patch_bytes", "ok": False, "detail": "missing"},
                 "evidence": d.get("evidence") or {},
             },
             limit=14000,
