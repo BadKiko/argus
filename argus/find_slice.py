@@ -57,6 +57,189 @@ _LARGE_FN = 0x800
 _MAX_COVER_STUB = 0x1800  # bigger → likely UI/app shell; stubbing entry kills launch
 _PARSER_FN = 0xC00
 
+_PASSWORD_SUBS = [
+    b"Password:",
+    b"password",
+    b"Go away",
+    b"Welcome",
+    b"Username:",
+]
+
+
+def _sym_addr(sym: Any) -> int:
+    if isinstance(sym, int):
+        return sym
+    return int(getattr(sym, "addr", sym))
+
+
+def _password_crackme_signals(img) -> bool:
+    syms = img.symbols or {}
+    if "authenticate" not in syms:
+        return False
+    blob = b""
+    for sec in getattr(img, "sections", []) or []:
+        if getattr(sec, "data", None):
+            blob += sec.data[: min(len(sec.data), 128 * 1024)]
+    low = blob.lower()
+    return any(s.lower() in low for s in _PASSWORD_SUBS)
+
+
+def _scan_password_auth_jmp(
+    img,
+    auth_addr: int,
+    module_path: str,
+    *,
+    seen_gate: set[str],
+) -> List[Dict[str, Any]]:
+    """After authenticate: test eax; unconditional jmp over success → force_branch."""
+    import capstone as cs
+
+    out: List[Dict[str, Any]] = []
+    mode = cs.CS_MODE_64 if getattr(img, "bits", 64) == 64 else cs.CS_MODE_32
+    md = cs.Cs(cs.CS_ARCH_X86, mode)
+    md.detail = True
+    auth_lo = auth_addr & 0xFFFFFFFF
+    syms = img.symbols or {}
+    fn_ranges: List[Tuple[int, int, str]] = []
+    for name, sym in syms.items():
+        if not getattr(sym, "is_function", True):
+            continue
+        start = _sym_addr(sym)
+        size = int(getattr(sym, "size", 0) or 0)
+        if size <= 0:
+            size = 0x200
+        fn_ranges.append((start, start + min(size, 0x800), str(name)))
+    if not fn_ranges:
+        fn_ranges.append((max(0, auth_addr - 0x100), auth_addr + 0x400, "unknown"))
+
+    for fn_start, fn_end, fn_name in fn_ranges:
+        data = img.read_bytes(fn_start, fn_end - fn_start)
+        if not data:
+            continue
+        insns = list(md.disasm(data, fn_start))
+        for n, insn in enumerate(insns):
+            if insn.mnemonic != "call":
+                continue
+            target = None
+            try:
+                if insn.operands and insn.operands[0].type == cs.x86.X86_OP_IMM:
+                    target = int(insn.operands[0].imm) & 0xFFFFFFFF
+            except Exception:
+                target = None
+            if target != auth_lo:
+                continue
+            test_i = jmp_i = None
+            for a in range(n + 1, min(len(insns), n + 8)):
+                am = insns[a].mnemonic
+                ao = insns[a].op_str or ""
+                if test_i is None and am == "test" and "eax" in ao:
+                    test_i = a
+                    continue
+                if test_i is not None and am == "jmp":
+                    jmp_i = a
+                    break
+            if jmp_i is None:
+                continue
+            j = insns[jmp_i]
+            key = f"force_branch:{hex(j.address)}"
+            if key in seen_gate:
+                continue
+            seen_gate.add(key)
+            call_fn = fn_name
+            try:
+                cov = function_covering(img, insn.address)
+                if cov and cov.name:
+                    call_fn = cov.name
+            except Exception:
+                pass
+            out.append(
+                {
+                    "kind": "force_branch",
+                    "addr": hex(j.address),
+                    "score": 530,
+                    "ui_label_only": False,
+                    "taken": True,
+                    "ret_guess": 1,
+                    "reason": "password: jmp over success after authenticate → redirect fallthrough",
+                    "nearby_fn": call_fn,
+                    "string_kind": "password",
+                    "mnemonic": f"{j.mnemonic} {j.op_str}",
+                    "module": module_path,
+                }
+            )
+            return out
+    return out
+
+
+def _password_crackme_gates(img, module_path: str) -> List[Dict[str, Any]]:
+    """Emit ret_imm on authenticate + wire gates near password strings."""
+    gates: List[Dict[str, Any]] = []
+    syms = img.symbols or {}
+    auth = syms.get("authenticate")
+    if auth is not None:
+        addr = _sym_addr(auth)
+        seen: set[str] = set()
+        gates.extend(_scan_password_auth_jmp(img, addr, module_path, seen_gate=seen))
+        if not any(g.get("reason", "").startswith("password: jmp") for g in gates):
+            gates.append(
+                {
+                    "kind": "ret_imm",
+                    "addr": hex(addr),
+                    "score": 520,
+                    "ui_label_only": False,
+                    "ret_guess": 1,
+                    "value": 1,
+                    "reason": "password crackme: stub authenticate → return 1",
+                    "nearby_fn": "authenticate",
+                    "fn_start": hex(addr),
+                    "string_kind": "password",
+                }
+            )
+    seen: set[str] = set()
+    hits: List[Dict[str, Any]] = []
+    for substr in _PASSWORD_SUBS:
+        for va, preview in _find_cstring_vas(img, substr, limit=2):
+            if va in {int(h["addr"], 0) for h in hits}:
+                continue
+            hits.append(
+                {
+                    "addr": hex(va),
+                    "preview": preview.decode("utf-8", errors="replace")[:80],
+                    "kind": "password",
+                    "substr": substr.decode("utf-8", errors="replace"),
+                }
+            )
+    targets = [int(h["addr"], 0) for h in hits]
+    xref_map = find_string_xrefs_multi(img, targets, max_per_target=6) if targets else {}
+    for sh in hits:
+        sva = int(sh["addr"], 0)
+        for xr in xref_map.get(sva) or []:
+            try:
+                xref_va = int(xr["addr"], 0)
+            except (TypeError, ValueError):
+                continue
+            cov = function_covering(img, xref_va)
+            meta = {
+                "nearby_fn": cov.name if cov else "main",
+                "fn_start": hex(cov.start) if cov else None,
+                "string_addr": sh.get("addr"),
+                "string_kind": "password",
+                "string_preview": sh.get("preview"),
+                "xref_addr": xr["addr"],
+            }
+            ranges: List[Tuple[int, int]] = []
+            if cov:
+                ranges.append((cov.start, cov.end))
+            ranges.append((max(0, xref_va - 0x400), xref_va + 0x80))
+            for a0, a1 in ranges:
+                for g in _scan_call_cmp1_gates(img, a0, a1, meta=meta, seen_gate=seen):
+                    g["module"] = module_path
+                    gates.append(g)
+    for g in gates:
+        g.setdefault("module", module_path)
+    return gates
+
+
 # Substrings safe to treat as "validate body lives here" (not generic chrome)
 _COVER_STUB_SUBS = {
     "doesn't appear to be valid",
@@ -567,6 +750,25 @@ def license_slice(
                     _scan_call_cmp1_gates(img, a0, a1, meta=meta, seen_gate=seen_gate)
                 )
 
+    if _password_crackme_signals(img):
+        pwd_gates = _password_crackme_gates(img, module_path)
+        for g in pwd_gates:
+            key = f"{g.get('kind')}:{g.get('addr')}"
+            if key not in seen_gate:
+                seen_gate.add(key)
+                gates.append(g)
+        if pwd_gates and not hits:
+            for substr in _PASSWORD_SUBS[:3]:
+                for va, preview in _find_cstring_vas(img, substr, limit=1):
+                    hits.append(
+                        {
+                            "addr": hex(va),
+                            "preview": preview.decode("utf-8", errors="replace")[:80],
+                            "kind": "password",
+                            "substr": substr.decode("utf-8", errors="replace"),
+                        }
+                    )
+
     gates.sort(key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True)))
     for g in gates:
         g["module"] = module_path
@@ -580,12 +782,19 @@ def license_slice(
 
     if unlock_plan:
         s0 = unlock_plan[0]
-        next_hint = (
-            f"UNLOCK: argus_unlock_apply with unlock_plan ({len(unlock_plan)} steps); "
-            f"first {s0.get('kind')} addr={s0.get('addr')}. "
-            f"Do not freestyle-patch parser gates outside the plan. "
-            f"Success = unlock_bytes verify only (rodata Unregistered may remain)."
-        )
+        if s0.get("string_kind") == "password" or s0.get("nearby_fn") == "authenticate":
+            next_hint = (
+                f"PASSWORD crackme: argus_unlock_apply unlock_plan ({len(unlock_plan)} steps); "
+                f"first {s0.get('kind')} addr={s0.get('addr')} (authenticate stub). "
+                f"Not a license unlock — behavior verify must pass."
+            )
+        else:
+            next_hint = (
+                f"UNLOCK: argus_unlock_apply with unlock_plan ({len(unlock_plan)} steps); "
+                f"first {s0.get('kind')} addr={s0.get('addr')}. "
+                f"Do not freestyle-patch parser gates outside the plan. "
+                f"Success = unlock_bytes verify only (rodata Unregistered may remain)."
+            )
     elif non_ui:
         pick = non_ui[0]
         next_hint = (
@@ -641,21 +850,29 @@ def license_slice_modules(
     If modules omitted, discover linked modules with license score > 0.
     If plan still empty and auto_widen: search nearby binaries (siblings / install dir).
     """
-    from argus.discover import discover_targets, linked_modules, license_needle_score, widen_modules
+    from argus.discover import discover_targets, linked_modules, license_needle_score, resolve_link_base, widen_modules
 
     paths: List[str] = [primary]
+    install_root: Optional[str] = None
+    try:
+        from argus.llm.session import get_session
+
+        install_root = get_session().install_dir or None
+    except Exception:
+        pass
+    link_primary = str(resolve_link_base(primary, install_root))
     if modules:
         for m in modules:
             if m and m not in paths:
                 paths.append(m)
     else:
-        disc = discover_targets(binary=primary, max_linked=max_modules)
+        disc = discover_targets(binary=link_primary, root=install_root, max_linked=max_modules)
         for m in disc.get("linked") or []:
             p = m.get("path")
             if p and int(m.get("score") or 0) > 0 and p not in paths:
                 paths.append(p)
         if len(paths) == 1:
-            for lp in linked_modules(primary, limit=max_modules):
+            for lp in linked_modules(link_primary, limit=max_modules):
                 if str(lp) not in paths and license_needle_score(lp) > 0:
                     paths.append(str(lp))
 
@@ -704,7 +921,7 @@ def license_slice_modules(
 
     # Pivot: nothing usable yet → widen to other nearby files
     if auto_widen and not unlock_plan:
-        extra = widen_modules(primary, tried=paths, limit=max_modules)
+        extra = widen_modules(link_primary, tried=paths, limit=max_modules, root=install_root)
         extra_paths = [e["path"] for e in extra if e.get("path")]
         if extra_paths:
             pivoted = True
