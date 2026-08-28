@@ -32,6 +32,16 @@ def openai_tool(name: str, description: str, properties: dict, required: Optiona
 
 ARGUS_TOOLS: List[dict] = [
     openai_tool(
+        "argus_research",
+        "Research when stuck: re-analyze binary, find strings, optional web hints. "
+        "Call before giving up on a task. Always pass for_task.",
+        {
+            "binary": {"type": "string", "description": "Work copy path"},
+            "query": {"type": "string", "description": "What to research (task/problem keywords)"},
+        },
+        ["binary", "query"],
+    ),
+    openai_tool(
         "argus_ai",
         "Natural-language solve/deobf/patch/lift. Prefer this for user intents like 'дай пароль'. "
         "For bypass/remove check prefer argus_patch after argus_find. Always pass for_task.",
@@ -110,6 +120,7 @@ ARGUS_TOOLS: List[dict] = [
         "Write a patched binary. Always pass for_task=<TASKS id>. "
         "replace_string: old=exact substring, new≤len(old). "
         "For license unlock prefer argus_slice then argus_unlock_apply (not freestyle gates). "
+        "Freestyle logic patch never completes unlock tasks. "
         "ETXTBSY: quit the running app. Never stub main/entry.",
         {
             "binary": {"type": "string"},
@@ -169,7 +180,8 @@ ARGUS_TOOLS: List[dict] = [
         "License unlock discovery (universal): validate/UI strings → xrefs → "
         "gate_candidates + unlock_plan. Scans linked DLL/SO when multi=true; auto-widens to "
         "nearby binaries if primary has no plan. If still empty: pivot via argus_discover. "
-        "Always call before unlock. Then argus_unlock_apply. Pass for_task.",
+        "Always call before unlock. Then argus_unlock_apply. Pass for_task. "
+        "If unlock_plan is empty: STOP — do not invent steps; pivot modules or use password path.",
         {
             "binary": {"type": "string"},
             "query": {"type": "string", "description": "Optional extra phrase e.g. invalid license"},
@@ -188,8 +200,9 @@ ARGUS_TOOLS: List[dict] = [
     openai_tool(
         "argus_unlock_apply",
         "Apply unlock_plan in order (ret_imm/force_branch) per module, then "
-        "static unlock_bytes verify. Pass steps from argus_slice unlock_plan, or omit steps to "
-        "auto-slice (multi-module). Prefer this over freestyle argus_patch for license unlock. Pass for_task.",
+        "composite verify (bytes + behavior smoke when available). "
+        "NEVER pass custom steps= unless copied verbatim from argus_slice unlock_plan JSON. "
+        "Omit steps= to auto-slice. Prefer this over freestyle argus_patch for license unlock. Pass for_task.",
         {
             "binary": {"type": "string"},
             "output": {"type": "string", "description": "Patched primary output path (default binary.patched)"},
@@ -383,8 +396,51 @@ def _weak_ui_xref_at(path: str, addr: Optional[int]) -> bool:
 
 def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
     """Execute one Argus tool; return JSON/text for the model."""
+    from argus.llm.session import get_session, record_slice_result
+
+    arguments = dict(arguments or {})
+    sess = get_session()
+    if sess.work_binary and sess.original_binary:
+        from argus.llm.workspace import assert_not_original_target, rewrite_tool_paths
+
+        arguments = rewrite_tool_paths(
+            arguments,
+            work_binary=sess.work_binary,
+            original_binary=sess.original_binary,
+        )
+        if name in ("argus_patch", "argus_unlock_apply", "argus_deobf"):
+            for key in ("binary", "output", "patch"):
+                err = assert_not_original_target(arguments.get(key), sess.original_binary)
+                if err:
+                    return _inject_task_fields(
+                        _envelope(ok=False, summary=err, evidence={"error": "original_protected"}),
+                        for_task=_parse_for_task(arguments),
+                    )
+
     for_task = _parse_for_task(arguments)
     missing_task_warn = "" if for_task is not None else "missing for_task — runtime will not count this toward TASK done"
+
+    sess = get_session()
+    if (
+        sess.strict_unlock
+        and name == "argus_unlock_apply"
+        and arguments.get("steps")
+        and sess.last_slice_plan_len == 0
+    ):
+        raw = _envelope(
+            ok=False,
+            summary="blocked: argus_unlock_apply with custom steps after empty unlock_plan",
+            evidence={
+                "error": "strict_unlock",
+                "plan_source": "rejected_model",
+                "slice_plan_len": 0,
+            },
+            verify={"kind": "unlock_bytes", "ok": False, "detail": "steps not from unlock_plan"},
+            next_hint="argus_slice must return non-empty unlock_plan before unlock_apply with steps=",
+            tool=name,
+        )
+        return _inject_task_fields(raw, for_task=for_task, warning=missing_task_warn)
+
     try:
         raw = _dispatch_tool_inner(name, arguments)
     except OSError as e:
@@ -429,6 +485,16 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
             addr = _parse_addr(arguments.get("addr"))
             if _weak_ui_xref_at(arguments.get("binary") or "", addr):
                 evidence_extra["weak_ui_xref"] = True
+            evidence_extra["blocks_unlock_done"] = True
+            evidence_extra["reason"] = "freestyle logic patch — not unlock_plan"
+
+    if name == "argus_slice":
+        try:
+            slice_payload = json.loads(raw)
+            plan = slice_payload.get("unlock_plan") or []
+            record_slice_result(arguments.get("binary") or "", plan)
+        except json.JSONDecodeError:
+            pass
 
     return _inject_task_fields(
         raw,
@@ -446,6 +512,23 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         err = _require_binary(arguments)
         if err is not None:
             return err
+
+    if name == "argus_research":
+        from argus.llm.research import run_research_tool
+        from argus.llm.session import get_session as _gs
+
+        _sess = _gs()
+        payload = run_research_tool(
+            arguments["binary"],
+            arguments.get("query") or "",
+            original_binary=_sess.original_binary or None,
+        )
+        return _envelope(
+            ok=bool(payload.get("ok")),
+            summary=str(payload.get("summary") or "research"),
+            evidence=payload.get("evidence") or {},
+            next_hint=payload.get("next_hint") or "",
+        )
 
     if name == "argus_ai":
         from argus.nl import ai
@@ -684,13 +767,29 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         return env
 
     if name == "argus_discover":
-        from argus.discover import discover_targets
+        from argus.discover import discover_targets, is_workspace_cache_path, merge_install_discover
+        from argus.llm.session import get_session
 
+        sess = get_session()
+        root = arguments.get("root")
+        inst = sess.install_dir or (
+            str(__import__("pathlib").Path(sess.original_binary).parent)
+            if sess.original_binary
+            else ""
+        )
+        if inst and (not root or is_workspace_cache_path(str(root))):
+            arguments["root"] = inst
         d = discover_targets(
             arguments.get("prompt") or "",
             root=arguments.get("root"),
             binary=arguments.get("binary"),
         )
+        if inst:
+            d = merge_install_discover(
+                d,
+                inst,
+                binary=sess.original_binary or arguments.get("binary"),
+            )
         return _truncate(
             {
                 "ok": bool(d.get("ok")),
@@ -766,6 +865,8 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 "ok": bool(d.get("ok")),
                 "summary": d.get("summary"),
                 "next_hint": d.get("next_hint"),
+                "plan_source": d.get("plan_source"),
+                "slice_plan_len": d.get("slice_plan_len"),
                 "patched_path": d.get("patched_path"),
                 "patched_paths": d.get("patched_paths") or {},
                 "unlock_plan": d.get("unlock_plan") or [],

@@ -9,10 +9,14 @@ import shutil
 import subprocess
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+try:
+    import httpx
+except ImportError:
+    httpx = None  # type: ignore
 
 from argus.llm.tools import ARGUS_TOOLS
 
@@ -104,6 +108,56 @@ class GeminiClient:
 
     def __init__(self, config: GeminiConfig):
         self.config = config
+        self._httpx: Any = None
+
+    def close(self) -> None:
+        if self._httpx is not None:
+            try:
+                self._httpx.close()
+            except Exception:
+                pass
+            self._httpx = None
+
+    def __enter__(self) -> "GeminiClient":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    def _transport(self) -> str:
+        """auto | httpx | curl | urllib — httpx reuses TLS (best for multi-step agent)."""
+        mode = (os.environ.get("ARGUS_GEMINI_HTTP") or "auto").strip().lower()
+        if mode in ("httpx", "curl", "urllib"):
+            return mode
+        if httpx is not None:
+            return "httpx"
+        if shutil.which("curl"):
+            return "curl"
+        return "urllib"
+
+    def _httpx_client(self) -> Any:
+        if httpx is None:
+            raise RuntimeError("httpx not installed — pip install httpx")
+        if self._httpx is None:
+            timeout = httpx.Timeout(self.config.timeout, connect=min(30.0, self.config.timeout))
+            self._httpx = httpx.Client(
+                timeout=timeout,
+                headers={"User-Agent": "argus-re/0.2"},
+                limits=httpx.Limits(max_keepalive_connections=8, keepalive_expiry=120.0),
+            )
+        return self._httpx
+
+    def _post_httpx(self, url: str, data: bytes) -> Tuple[int, bytes]:
+        assert httpx is not None
+        resp = self._httpx_client().post(
+            url,
+            content=data,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.config.api_key,
+            },
+        )
+        return resp.status_code, resp.content
 
     def _endpoint(self) -> str:
         model = self.config.model
@@ -122,6 +176,8 @@ class GeminiClient:
             curl,
             "-sS",
             "--http1.1",
+            "--connect-timeout",
+            "20",
             "-X",
             "POST",
             url,
@@ -174,6 +230,7 @@ class GeminiClient:
         system: Optional[str] = None,
         tools: Optional[List[dict]] = None,
         temperature: float = 0.2,
+        status_cb: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {
             "contents": contents,
@@ -188,11 +245,16 @@ class GeminiClient:
         url = self._endpoint()
         last_err: Optional[Exception] = None
         max_attempts = 6
-        prefer_curl = shutil.which("curl") is not None
+        transport = self._transport()
         for attempt in range(1, max_attempts + 1):
-            use_curl = prefer_curl and (attempt <= 3 or attempt % 2 == 1)
+            # Stick to one transport per session — alternating curl/urllib re-handshakes TLS every step.
+            use = transport
+            if use == "httpx" and httpx is None:
+                use = "curl" if shutil.which("curl") else "urllib"
             try:
-                if use_curl:
+                if use == "httpx":
+                    code, raw = self._post_httpx(url, data)
+                elif use == "curl":
                     code, raw = self._post_curl(url, data)
                 else:
                     code, raw = self._post_urllib(url, data)
@@ -203,22 +265,53 @@ class GeminiClient:
                         f"Gemini timed out after {self.config.timeout}s for model={self.config.model}. "
                         f"Try --model gemini-3.6-flash."
                     ) from e
-                time.sleep(1.5 * attempt)
+                time.sleep(min(2.0 * attempt, 8.0))
                 continue
             except (OSError, urllib.error.URLError) as e:
                 last_err = e
-                reason = str(getattr(e, "reason", e))
-                wait = min(5.0 * attempt, 25.0)
-                print(
-                    f"[gemini] connection/SSL glitch via "
-                    f"{'curl' if use_curl else 'urllib'} — retry in {wait:.0f}s "
-                    f"(attempt {attempt}/{max_attempts}) …",
-                    flush=True,
-                )
+                wait = min(2.0 * attempt, 10.0)
+                if attempt == 1 or attempt == max_attempts:
+                    msg = (
+                        f"connection glitch ({use}) — retry in {wait:.0f}s "
+                        f"({attempt}/{max_attempts}): {e}"
+                    )
+                    if status_cb:
+                        status_cb(msg)
+                    else:
+                        print(f"[gemini] {msg}", flush=True)
                 if attempt >= max_attempts:
-                    raise RuntimeError(f"Gemini connection failed: {e}") from e
+                    hint = (
+                        " Tips: pip install httpx; export ARGUS_GEMINI_HTTP=httpx; "
+                        "check VPN/proxy; try --provider openai with a compat endpoint."
+                    )
+                    raise RuntimeError(f"Gemini connection failed: {e}.{hint}") from e
                 time.sleep(wait)
                 continue
+            except Exception as e:
+                # httpx raises httpx.ConnectError / ReadError for TLS EOF
+                if httpx is not None and isinstance(
+                    e, (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.TimeoutException)
+                ):
+                    last_err = e
+                    wait = min(2.0 * attempt, 10.0)
+                    if attempt == 1 or attempt == max_attempts:
+                        msg = (
+                            f"connection glitch (httpx) — retry in {wait:.0f}s "
+                            f"({attempt}/{max_attempts}): {e}"
+                        )
+                        if status_cb:
+                            status_cb(msg)
+                        else:
+                            print(f"[gemini] {msg}", flush=True)
+                    if attempt >= max_attempts:
+                        hint = (
+                            " Tips: export ARGUS_GEMINI_HTTP=httpx; disable VPN; "
+                            "or ARGUS_GEMINI_HTTP=curl if httpx fails."
+                        )
+                        raise RuntimeError(f"Gemini connection failed: {e}.{hint}") from e
+                    time.sleep(wait)
+                    continue
+                raise
 
             text = raw.decode("utf-8", errors="replace")
             if code == 200:
