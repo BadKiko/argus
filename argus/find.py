@@ -104,9 +104,9 @@ def _suggested_ret_value(name: str) -> int:
 
 
 def _query_intent(query: Optional[str]) -> str:
-    """Return 'ui' | 'unlock' | 'mixed' for next_hint tone (no vendor logic)."""
+    """Return 'ui' | 'gate_transform' | 'mixed' for next_hint tone (no vendor logic)."""
     q = (query or "").lower()
-    unlock_kw = (
+    gate_kw = (
         "unlock",
         "bypass",
         "ret_imm",
@@ -136,17 +136,17 @@ def _query_intent(query: Optional[str]) -> str:
         "infinity",
         "∞",
     )
-    wants_unlock = any(k in q for k in unlock_kw)
+    wants_gate = any(k in q for k in gate_kw)
     wants_ui = any(k in q for k in ui_kw)
-    if wants_unlock and wants_ui:
+    if wants_gate and wants_ui:
         return "mixed"
-    if wants_unlock:
-        return "unlock"
+    if wants_gate:
+        return "gate_transform"
     if wants_ui:
         return "ui"
     if q and not any(k in q for k in ("license", "licence", "trial", "activat", "unlock")):
         return "ui"
-    return "unlock" if any(k in q for k in ("license", "licence", "trial", "activat")) else "mixed"
+    return "gate_transform" if any(k in q for k in ("license", "licence", "trial", "activat")) else "mixed"
 
 
 def _collect_gate_symbols(img, query: Optional[str] = None, limit: int = 16) -> List[Dict[str, Any]]:
@@ -787,7 +787,7 @@ def find_in_binary(
         gate_candidates = rank_gate_candidates(img, top, limit=12)
         patch_candidates = list(gate_candidates)
 
-    # On stripped / license-ish queries, merge universal license_slice gates
+    # On stripped / license-ish queries, merge universal gate_scan gates
     qlow = (query or "").lower()
     license_ish = any(
         k in qlow
@@ -795,9 +795,9 @@ def find_in_binary(
     )
     if with_xrefs and (stripped or license_ish):
         try:
-            from argus.find_slice import license_slice
+            from argus.find_slice import gate_scan
 
-            sliced = license_slice(path, query if license_ish else "invalid license", limit=12)
+            sliced = gate_scan(path, query if license_ish else "invalid license", limit=12)
             seen_g = {(g.get("kind"), g.get("addr")) for g in gate_candidates}
             for g in sliced.get("gate_candidates") or []:
                 key = (g.get("kind"), g.get("addr"))
@@ -848,7 +848,7 @@ def find_in_binary(
         addrs0 = [s["addr"] for s in suggested_stubs if int(s["value"]) == 0][:6]
         addrs1 = [s["addr"] for s in suggested_stubs if int(s["value"]) == 1][:4]
         parts = [
-            f"PREFERRED unlock path: stub ranked gate_symbols (not UI Callback/Widget from string xrefs). "
+            f"PREFERRED gate path: stub ranked gate_symbols (not UI Callback/Widget from string xrefs). "
             f"Top gates={names}."
         ]
         if addrs0:
@@ -863,7 +863,7 @@ def find_in_binary(
             )
         parts.append("Do NOT ret_imm *Callback* / *Widget* alone — that usually leaves PRO locked.")
         if intent == "mixed":
-            parts.append("After unlock, use replace_string for any UI text the user asked for.")
+            parts.append("After gate transform, use replace_string for any UI text the user asked for.")
         next_hint = " ".join(parts)
     elif gate_candidates:
         top_g = gate_candidates[0]
@@ -879,19 +879,19 @@ def find_in_binary(
                 f"gate_candidates ranked: prefer score>=40 and ui_label_only=false. "
                 f"Try argus_patch kind={pick.get('kind')} addr={pick.get('addr')} "
                 f"value={pick.get('ret_guess', 1)}{taken_bit} — {pick.get('reason')}. "
-                f"If ui_label_only, do NOT claim unlock; try next candidate then re-find Unregistered."
+                f"If ui_label_only, do NOT claim behavior change; try next candidate then re-find strings."
             )
         if stripped:
             next_hint += " Stripped: prefer argus_slice then force_branch/ret_imm on non_ui gates."
     else:
         next_hint = (
             "no suggested_stubs and no gate_candidates; binary may be stripped — "
-            "do not claim unlock; dig with more queries/xrefs/lift or report incomplete"
+            "do not claim behavior verified; dig with more queries/xrefs/lift or report incomplete"
         )
         if stripped:
             next_hint = (
-                "STRIPPED commercial-like binary: call argus_slice then argus_unlock_apply. "
-                "Patch unlock_plan only; never claim unlock from UI strings alone."
+                "STRIPPED commercial-like binary: call argus_slice then argus_apply_plan. "
+                "Patch patch_plan only; never claim behavior change from UI strings alone."
             )
 
     return {

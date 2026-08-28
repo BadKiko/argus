@@ -427,10 +427,10 @@ def cmd_agent(args: argparse.Namespace) -> int:
 
     if args.no_memory:
         os.environ["ARGUS_MEMORY"] = "0"
-    if getattr(args, "permissive_unlock", False):
-        os.environ["ARGUS_STRICT_UNLOCK"] = "0"
+    if getattr(args, "permissive_plan", False):
+        os.environ["ARGUS_STRICT_PLAN"] = "0"
     else:
-        os.environ.setdefault("ARGUS_STRICT_UNLOCK", "1")
+        os.environ.setdefault("ARGUS_STRICT_PLAN", "1")
 
     from argus.llm.agent import binary_missing, missing_binary_message, resolve_provider, run_agent
 
@@ -831,9 +831,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Interactive mode: max follow-up attempts after user feedback (default 3)",
     )
     ag.add_argument(
-        "--permissive-unlock",
+        "--permissive-plan",
         action="store_true",
-        help="Disable strict unlock gates (allow model-invented unlock steps; debug only)",
+        help="Disable strict patch-plan gates (allow model-invented steps; debug only)",
     )
     ag.add_argument(
         "-v",

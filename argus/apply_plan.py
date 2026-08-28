@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Batch unlock apply + static byte verify (no GUI / no vendor recipes)."""
+"""Batch patch-plan apply + static byte verify (no GUI / no vendor recipes)."""
 
 import os
 import shutil
@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from argus.ask import Hint, PatchKind, Want, ask
 from argus.binary import load_binary
-from argus.find_slice import license_slice, license_slice_modules
-from argus.llm.session import strict_unlock_enabled
+from argus.find_slice import gate_scan, gate_scan_modules
+from argus.llm.session import strict_plan_enabled
+
+from argus.prove.certificate import certify_apply_plan, level_from_verify
 
 _BEHAVIOR_DENY = (
     b"go away",
@@ -57,7 +59,7 @@ def _module_output(src: str, primary_out: str, primary_src: str) -> str:
     return str(parent / f"{stem}-patch")
 
 
-def verify_unlock_bytes(
+def verify_patch_bytes(
     original: str,
     patched: str,
     steps: List[Dict[str, Any]],
@@ -66,15 +68,15 @@ def verify_unlock_bytes(
 ) -> Dict[str, Any]:
     """
     Static check: each plan step changed bytes in the expected way.
-    Does NOT claim GUI 'licensed' — only that unlock patches landed.
+    Does NOT claim GUI 'licensed' — only that patch bytes landed.
     """
     details: List[Dict[str, Any]] = []
     all_ok = True
     if not steps:
         return {
-            "kind": "unlock_bytes",
+            "kind": "patch_bytes",
             "ok": False,
-            "detail": "empty unlock_plan",
+            "detail": "empty patch_plan",
             "steps": [],
         }
 
@@ -151,7 +153,7 @@ def verify_unlock_bytes(
         details.append(row)
 
     return {
-        "kind": "unlock_bytes",
+        "kind": "patch_bytes",
         "ok": all_ok,
         "detail": "all plan steps patched" if all_ok else "one or more steps failed verify",
         "steps": details,
@@ -205,7 +207,7 @@ def _steps_subset_of_plan(
 
 
 def _behavior_verify_enabled() -> bool:
-    return os.environ.get("ARGUS_UNLOCK_BEHAVIOR", "1").strip().lower() not in (
+    return os.environ.get("ARGUS_PATCH_BEHAVIOR", "1").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -213,7 +215,7 @@ def _behavior_verify_enabled() -> bool:
     )
 
 
-def verify_unlock_behavior(
+def verify_patch_behavior(
     patched: str,
     *,
     allow_strings: Optional[List[str]] = None,
@@ -224,7 +226,7 @@ def verify_unlock_behavior(
     p = Path(patched)
     if not p.is_file():
         return {
-            "kind": "unlock_behavior",
+            "kind": "patch_behavior",
             "ok": False,
             "detail": "patched file missing",
             "ran": False,
@@ -232,14 +234,14 @@ def verify_unlock_behavior(
     try:
         if p.stat().st_size > max_bytes:
             return {
-                "kind": "unlock_behavior",
+                "kind": "patch_behavior",
                 "ok": False,
                 "detail": "binary too large for behavior smoke",
                 "ran": False,
                 "skipped": True,
             }
     except OSError as e:
-        return {"kind": "unlock_behavior", "ok": False, "detail": str(e), "ran": False}
+        return {"kind": "patch_behavior", "ok": False, "detail": str(e), "ran": False}
 
     stdout = b""
     ran = False
@@ -272,7 +274,7 @@ def verify_unlock_behavior(
             method = "subprocess"
         except Exception as e:
             return {
-                "kind": "unlock_behavior",
+                "kind": "patch_behavior",
                 "ok": False,
                 "detail": f"behavior run failed: {e}",
                 "ran": False,
@@ -283,7 +285,7 @@ def verify_unlock_behavior(
         if deny in low:
             preview = stdout[:240].decode("utf-8", errors="replace")
             return {
-                "kind": "unlock_behavior",
+                "kind": "patch_behavior",
                 "ok": False,
                 "detail": f"stdout contains deny phrase {deny!r}",
                 "stdout_preview": preview,
@@ -296,7 +298,7 @@ def verify_unlock_behavior(
         allow_ok = any(s.encode() in stdout for s in allow_strings if s)
     preview = stdout[:240].decode("utf-8", errors="replace")
     return {
-        "kind": "unlock_behavior",
+        "kind": "patch_behavior",
         "ok": bool(allow_ok),
         "detail": "behavior smoke ok" if allow_ok else "stdout missing expected allow strings",
         "stdout_preview": preview,
@@ -316,23 +318,23 @@ def _composite_verify(
     if behavior_ran:
         ok = bytes_ok and behavior_ok
         detail = "bytes+behavior ok" if ok else "behavior or bytes verify failed"
-        kind = "unlock_composite"
+        kind = "patch_composite"
     else:
         ok = bytes_ok
         detail = bytes_verify.get("detail") or ("bytes ok" if ok else "bytes verify failed")
-        kind = "unlock_bytes"
+        kind = "patch_bytes"
     out: Dict[str, Any] = {
         "kind": kind,
         "ok": ok,
         "detail": detail,
-        "unlock_bytes": bytes_verify,
+        "patch_bytes": bytes_verify,
     }
     if behavior_verify is not None:
-        out["unlock_behavior"] = behavior_verify
+        out["patch_behavior"] = behavior_verify
     return out
 
 
-def unlock_apply(
+def apply_plan(
     path: str,
     *,
     output: Optional[str] = None,
@@ -342,8 +344,8 @@ def unlock_apply(
     multi: bool = True,
 ) -> Dict[str, Any]:
     """
-    Apply unlock_plan steps. Steps may target different modules via step['module'].
-    If steps omitted, build plan via multi-module license_slice when multi=True.
+    Apply patch_plan steps. Steps may target different modules via step['module'].
+    If steps omitted, build plan via multi-module gate_scan when multi=True.
     """
     out = output or (str(path) + ".patched")
     explicit_steps = steps is not None and len(steps or []) > 0
@@ -352,36 +354,36 @@ def unlock_apply(
     plan_source = "empty"
 
     if multi or modules:
-        slice_info = license_slice_modules(path, modules=modules, query=query)
+        slice_info = gate_scan_modules(path, modules=modules, query=query)
     else:
-        slice_info = license_slice(path, query)
-    slice_plan = list(slice_info.get("unlock_plan") or [])
+        slice_info = gate_scan(path, query)
+    slice_plan = list(slice_info.get("patch_plan") or [])
 
     if explicit_steps:
-        if strict_unlock_enabled() and not _steps_subset_of_plan(plan, slice_plan, path):
+        if strict_plan_enabled() and not _steps_subset_of_plan(plan, slice_plan, path):
             plan_source = "rejected_model"
             verify = {
-                "kind": "unlock_bytes",
+                "kind": "patch_bytes",
                 "ok": False,
-                "detail": "steps not from unlock_plan",
+                "detail": "steps not from patch_plan",
                 "steps": [],
             }
             return {
                 "ok": False,
-                "summary": "unlock_apply rejected model-invented steps",
+                "summary": "apply_plan rejected model-invented steps",
                 "plan_source": plan_source,
                 "slice_plan_len": len(slice_plan),
-                "unlock_plan": plan,
+                "patch_plan": plan,
                 "patched_path": None,
                 "patched_paths": [],
                 "applied": [],
                 "verify": verify,
                 "next_hint": (
-                    "custom steps must match argus_slice unlock_plan exactly — "
+                    "custom steps must match argus_slice patch_plan exactly — "
                     "re-slice or omit steps= for auto-apply"
                 ),
                 "evidence": {
-                    "unlock_plan": plan,
+                    "patch_plan": plan,
                     "slice_plan": slice_plan,
                     "slice": slice_info,
                     "plan_source": plan_source,
@@ -395,22 +397,22 @@ def unlock_apply(
     if not plan:
         return {
             "ok": False,
-            "summary": "no unlock_plan",
+            "summary": "no patch_plan",
             "plan_source": plan_source,
             "slice_plan_len": len(slice_plan),
-            "unlock_plan": [],
+            "patch_plan": [],
             "patched_path": None,
             "patched_paths": [],
             "applied": [],
             "verify": {
-                "kind": "unlock_bytes",
+                "kind": "patch_bytes",
                 "ok": False,
                 "detail": "empty plan",
                 "steps": [],
             },
             "next_hint": slice_info.get("next_hint")
-            or "argus_slice returned no unlock_plan — incomplete",
-            "evidence": {"unlock_plan": [], "slice": slice_info, "plan_source": plan_source},
+            or "argus_slice returned no patch_plan — incomplete",
+            "evidence": {"patch_plan": [], "slice": slice_info, "plan_source": plan_source},
         }
 
     # Group steps by module
@@ -486,7 +488,7 @@ def unlock_apply(
         if not r.ok:
             break
 
-    bytes_verify = verify_unlock_bytes(path, module_outs.get(path, out), plan, module_pairs=pairs)
+    bytes_verify = verify_patch_bytes(path, module_outs.get(path, out), plan, module_pairs=pairs)
     behavior_verify: Optional[Dict[str, Any]] = None
     primary_out = module_outs.get(path, out)
     if bytes_verify.get("ok") and primary_out and Path(primary_out).is_file():
@@ -498,32 +500,38 @@ def unlock_apply(
                     allow.append(str(s))
             elif isinstance(hit, str):
                 allow.append(hit)
-        behavior_verify = verify_unlock_behavior(primary_out, allow_strings=allow or None)
+        behavior_verify = verify_patch_behavior(primary_out, allow_strings=allow or None)
     verify = _composite_verify(bytes_verify, behavior_verify)
     ok = bool(verify.get("ok")) and all(a.get("ok") for a in applied)
     primary_out = module_outs.get(path, out)
+    certificate = certify_apply_plan(applied, verify)
+    verification_level = level_from_verify(verify).value
     return {
         "ok": ok,
         "summary": (
-            f"unlock_apply steps={len(applied)}/{len(plan)} modules={len(module_outs)} "
+            f"apply_plan steps={len(applied)}/{len(plan)} modules={len(module_outs)} "
             f"verify={'ok' if verify.get('ok') else 'fail'} plan_source={plan_source}"
         ),
         "plan_source": plan_source,
         "slice_plan_len": len(slice_plan),
-        "unlock_plan": plan,
+        "patch_plan": plan,
         "patched_path": primary_out if applied else None,
         "patched_paths": list(module_outs.values()),
         "applied": applied,
         "verify": verify,
+        "certificate": certificate.to_dict(),
+        "verification_level": verification_level,
         "next_hint": (
-            "unlock verify ok — do not claim GUI licensed; Unregistered may remain in rodata"
+            "patch verify ok — do not claim GUI licensed; rodata strings may remain"
             if ok
-            else "unlock incomplete — inspect applied[].detail / try argus_discover + slice"
+            else "patch incomplete — inspect applied[].detail / try argus_discover + slice"
         ),
         "evidence": {
-            "unlock_plan": plan,
+            "patch_plan": plan,
             "applied": applied,
             "verify": verify,
+            "certificate": certificate.to_dict(),
+            "verification_level": verification_level,
             "modules": list(module_outs.keys()),
             "plan_source": plan_source,
             "slice_plan_len": len(slice_plan),

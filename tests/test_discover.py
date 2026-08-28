@@ -10,10 +10,10 @@ from argus.discover import (
     discover_targets,
     extract_paths_from_text,
     is_binary_file,
-    license_needle_score,
+    signal_score,
     scan_binaries,
 )
-from argus.find_slice import license_slice
+from argus.find_slice import gate_scan
 from argus.llm.tools import ARGUS_TOOLS, dispatch_tool
 
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
@@ -38,7 +38,7 @@ def test_rank_fauxware_beats_decoy(tmp_path):
 
     assert not is_binary_file(decoy)
     assert is_binary_file(bin_path)
-    assert license_needle_score(bin_path) > 0
+    assert signal_score(bin_path) > 0
 
     found = scan_binaries(tmp_path, max_depth=1, limit=20)
     assert bin_path.resolve() in [p.resolve() for p in found]
@@ -72,9 +72,9 @@ def test_list_pe_dependent_dlls_skip_if_no_sample():
     assert isinstance(names, list)
 
 
-def test_unlock_plan_includes_module():
-    d = license_slice(str(SAMPLES / "fauxware"), "password")
-    plan = d.get("unlock_plan") or []
+def test_patch_plan_includes_module():
+    d = gate_scan(str(SAMPLES / "fauxware"), "password")
+    plan = d.get("patch_plan") or []
     if not plan:
         # slice may be empty on tiny sample — still tag module on gates path
         assert d.get("module") == str(SAMPLES / "fauxware") or d.get("ok") is True
@@ -143,11 +143,20 @@ def test_widen_modules_finds_scored_neighbor(tmp_path):
 def test_slice_modules_pivots_when_primary_empty(monkeypatch, tmp_path):
     """Empty plan on primary → auto-widen into neighbor with gates."""
     from argus import find_slice as fs
+    from argus.llm.session import reset_session
 
+    reset_session()
     primary = tmp_path / "app"
     sib = tmp_path / "gate_mod"
     primary.write_bytes(b"\x7fELF" + b"\0" * 256)
     sib.write_bytes(b"\x7fELF" + b"\0" * 256)
+
+    def fake_widen(primary_path, tried=None, limit=12, root=None):
+        del primary_path, tried, limit, root
+        return [{"path": str(sib), "score": 100, "name": "gate_mod"}]
+
+    monkeypatch.setattr(fs, "widen_modules", fake_widen, raising=False)
+    monkeypatch.setattr("argus.discover.widen_modules", fake_widen)
 
     def fake_slice(path, query=None, limit=16):
         if Path(path).name == "gate_mod":
@@ -167,7 +176,7 @@ def test_slice_modules_pivots_when_primary_empty(monkeypatch, tmp_path):
                 "summary": "hit",
                 "string_hits": [{"addr": "0x200", "kind": "validate", "preview": "invalid license"}],
                 "gate_candidates": [gate],
-                "unlock_plan": [],
+                "patch_plan": [],
                 "module": path,
             }
         return {
@@ -175,15 +184,15 @@ def test_slice_modules_pivots_when_primary_empty(monkeypatch, tmp_path):
             "summary": "empty",
             "string_hits": [],
             "gate_candidates": [],
-            "unlock_plan": [],
+            "patch_plan": [],
             "module": path,
         }
 
-    monkeypatch.setattr(fs, "license_slice", fake_slice)
-    d = fs.license_slice_modules(str(primary), modules=[], auto_widen=True, max_modules=4)
+    monkeypatch.setattr(fs, "gate_scan", fake_slice)
+    d = fs.gate_scan_modules(str(primary), modules=[], auto_widen=True, max_modules=4)
     assert d.get("pivoted") is True
     assert any(Path(m).name == "gate_mod" for m in (d.get("modules") or []))
-    plan = d.get("unlock_plan") or []
+    plan = d.get("patch_plan") or []
     assert plan
     assert any(Path(str(s.get("module") or "")).name == "gate_mod" for s in plan)
 

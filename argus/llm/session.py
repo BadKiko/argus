@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-"""Per-agent-run session state for strict unlock gates."""
+"""Per-agent-run session state for strict patch-plan gates."""
 
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
-def strict_unlock_enabled() -> bool:
-    return os.environ.get("ARGUS_STRICT_UNLOCK", "1").strip().lower() not in (
+def strict_plan_enabled() -> bool:
+    return os.environ.get("ARGUS_STRICT_PLAN", "1").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -18,9 +18,9 @@ def strict_unlock_enabled() -> bool:
 
 @dataclass
 class SessionContext:
-    strict_unlock: bool = True
-    last_slice_plan_len: int = 0
-    last_slice_unlock_plan: List[Dict[str, Any]] = field(default_factory=list)
+    strict_plan: bool = True
+    last_patch_plan_len: int = 0
+    last_slice_patch_plan: List[Dict[str, Any]] = field(default_factory=list)
     last_slice_binary: str = ""
     fauxware_loop_warned: bool = False
     original_binary: str = ""
@@ -35,20 +35,20 @@ _current: Optional[SessionContext] = None
 def get_session() -> SessionContext:
     global _current
     if _current is None:
-        _current = SessionContext(strict_unlock=strict_unlock_enabled())
+        _current = SessionContext(strict_plan=strict_plan_enabled())
     return _current
 
 
-def reset_session(*, strict_unlock: Optional[bool] = None) -> SessionContext:
+def reset_session(*, strict_plan: Optional[bool] = None) -> SessionContext:
     global _current
     _current = SessionContext(
-        strict_unlock=strict_unlock if strict_unlock is not None else strict_unlock_enabled()
+        strict_plan=strict_plan if strict_plan is not None else strict_plan_enabled()
     )
     return _current
 
 
-def record_slice_result(binary: str, unlock_plan: List[Dict[str, Any]]) -> None:
+def record_gate_scan_result(binary: str, patch_plan: List[Dict[str, Any]]) -> None:
     sess = get_session()
     sess.last_slice_binary = binary
-    sess.last_slice_unlock_plan = list(unlock_plan or [])
-    sess.last_slice_plan_len = len(sess.last_slice_unlock_plan)
+    sess.last_slice_patch_plan = list(patch_plan or [])
+    sess.last_patch_plan_len = len(sess.last_slice_patch_plan)

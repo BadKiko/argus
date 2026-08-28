@@ -1,14 +1,14 @@
-"""Universal unlock_plan + unlock_apply (no vendor hardcode)."""
+"""Universal patch_plan + apply_plan (no vendor hardcode)."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from argus.find_slice import build_unlock_plan, license_slice
+from argus.find_slice import build_patch_plan, gate_scan
 from argus.llm.tasks import UserTask, finalize_agent
 from argus.llm.tools import ARGUS_TOOLS, dispatch_tool
-from argus.unlock import unlock_apply, verify_unlock_bytes
+from argus.apply_plan import apply_plan, verify_patch_bytes
 
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 
@@ -20,7 +20,7 @@ def test_no_vendor_needles_in_find_slice_source():
     assert "purchase_license_cta" not in text
 
 
-def test_build_unlock_plan_ordering():
+def test_build_patch_plan_ordering():
     gates = [
         {
             "kind": "ret_imm",
@@ -54,7 +54,7 @@ def test_build_unlock_plan_ordering():
             "xref_addr": "0x2210",
         },
     ]
-    plan = build_unlock_plan(gates)
+    plan = build_patch_plan(gates)
     assert plan
     assert plan[0]["kind"] == "ret_imm" and plan[0]["addr"] == "0x1000"
     kinds = [s["kind"] for s in plan]
@@ -62,14 +62,14 @@ def test_build_unlock_plan_ordering():
     assert len(plan) <= 5
 
 
-def test_license_slice_fauxware_smoke():
-    d = license_slice(str(SAMPLES / "fauxware"), "password")
+def test_gate_scan_fauxware_smoke():
+    d = gate_scan(str(SAMPLES / "fauxware"), "password")
     assert d.get("ok") is True
-    assert "unlock_plan" in d
-    assert isinstance(d["unlock_plan"], list)
+    assert "patch_plan" in d
+    assert isinstance(d["patch_plan"], list)
 
 
-def test_unlock_apply_fauxware_rejects_invented_steps(tmp_path):
+def test_apply_plan_fauxware_rejects_invented_steps(tmp_path):
     """Fauxware is a password crackme — invented authenticate stub is not slice-sourced."""
     import shutil
 
@@ -83,13 +83,13 @@ def test_unlock_apply_fauxware_rejects_invented_steps(tmp_path):
         {"kind": "ret_imm", "addr": hex(auth), "value": 1, "why": "test stub"},
     ]
     out = tmp_path / "out.patched"
-    d = unlock_apply(str(src), output=str(out), steps=steps)
+    d = apply_plan(str(src), output=str(out), steps=steps)
     assert d.get("plan_source") == "rejected_model"
     assert d.get("ok") is False
     assert d["verify"]["ok"] is False
 
 
-def test_dispatch_unlock_apply_and_finalize(tmp_path):
+def test_dispatch_apply_plan_and_finalize(tmp_path):
     """Finalize accepts unlock only with slice plan evidence + plan_source=slice."""
     import shutil
 
@@ -101,7 +101,7 @@ def test_dispatch_unlock_apply_and_finalize(tmp_path):
     auth = img.symbols["authenticate"].addr
     step = {"kind": "ret_imm", "addr": hex(auth), "value": 1}
     raw = dispatch_tool(
-        "argus_unlock_apply",
+        "argus_apply_plan",
         {
             "binary": str(src),
             "output": str(tmp_path / "u.patched"),
@@ -123,12 +123,12 @@ def test_dispatch_unlock_apply_and_finalize(tmp_path):
             "result": {
                 "ok": True,
                 "for_task": 1,
-                "unlock_plan": [step],
-                "evidence": {"unlock_plan": [step]},
+                "patch_plan": [step],
+                "evidence": {"patch_plan": [step]},
             },
         },
         {
-            "tool": "argus_unlock_apply",
+            "tool": "argus_apply_plan",
             "args": {"for_task": 1},
             "result": {
                 "ok": True,
@@ -136,11 +136,11 @@ def test_dispatch_unlock_apply_and_finalize(tmp_path):
                 "plan_source": "slice",
                 "slice_plan_len": 1,
                 "verify": {
-                    "kind": "unlock_composite",
+                    "kind": "patch_composite",
                     "ok": True,
                     "detail": "bytes+behavior ok",
-                    "unlock_bytes": {"ok": True},
-                    "unlock_behavior": {"ok": True, "ran": True},
+                    "patch_bytes": {"ok": True},
+                    "patch_behavior": {"ok": True, "ran": True},
                 },
             },
         },
@@ -155,10 +155,10 @@ def test_optional_commercial_slice_oracle():
     path = Path("/opt/sublime_merge/sublime_merge")
     if not path.is_file():
         return
-    d = license_slice(str(path), "license key")
+    d = gate_scan(str(path), "license key")
     assert d["ok"]
-    plan = d.get("unlock_plan") or []
-    assert plan, "expected unlock_plan on license-bearing binary"
+    plan = d.get("patch_plan") or []
+    assert plan, "expected patch_plan on license-bearing binary"
     # Primary should be logic gate
     assert plan[0]["kind"] in ("ret_imm", "force_branch")
     if plan[0]["kind"] == "ret_imm":

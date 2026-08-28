@@ -87,7 +87,7 @@ def is_binary_file(path: Path) -> bool:
     return False
 
 
-def license_needle_score(path: Path | str, *, max_read: int = 8_000_000) -> int:
+def signal_score(path: Path | str, *, max_read: int = 8_000_000) -> int:
     """Cheap score: count of generic license/UI needle hits in file bytes."""
     p = Path(path)
     try:
@@ -350,7 +350,7 @@ def widen_modules(
         if not p.is_file() or not is_binary_file(p):
             continue
         seen.add(key)
-        ranked.append((license_needle_score(p), p.resolve()))
+        ranked.append((signal_score(p), p.resolve()))
 
     ranked.sort(key=lambda t: (-t[0], t[1].name.lower()))
     # Prefer score>0; if none, still return a few nearby binaries to try
@@ -462,7 +462,7 @@ def discover_targets(
         if not s.is_file() or not is_binary_file(s):
             continue
         seen.add(key)
-        scored = license_needle_score(s)
+        scored = signal_score(s)
         ranked.append((scored, s.resolve()))
 
     ranked.sort(key=lambda t: (-t[0], t[1].name.lower()))
@@ -481,7 +481,7 @@ def discover_targets(
     link_base = resolve_link_base(primary, root) if primary else None
     if link_base and link_base.is_file():
         for mod in linked_modules(link_base, limit=max_linked * 2):
-            sc = license_needle_score(mod)
+            sc = signal_score(mod)
             linked.append({"path": str(mod), "score": sc, "name": Path(mod).name})
         linked.sort(key=lambda x: (-int(x["score"]), x["name"]))
         # Prefer modules that actually look license-related for unlock expansion
@@ -497,7 +497,7 @@ def discover_targets(
         "candidates": candidates[:20],
         "linked": linked,
         "next_hint": (
-            f"Use binary={primary}; related modules listed in linked[] for argus_slice / unlock"
+            f"Use binary={primary}; related modules listed in linked[] for argus_slice / apply_plan"
             if primary
             else "No ELF/PE found — pass a path or run from a directory containing the binary"
         ),
