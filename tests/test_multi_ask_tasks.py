@@ -96,6 +96,26 @@ def test_split_single_stays_one():
     assert "пароль" in tasks[0].text
 
 
+def test_finalize_password_question_done():
+    from argus.llm.tools import dispatch_tool
+    import json
+
+    fw = SAMPLES / "fauxware"
+    if not fw.is_file():
+        return
+    path = str(fw)
+    ai = json.loads(dispatch_tool("argus_ai", {"prompt": "какой пароль?", "binary": path, "for_task": 1}))
+    tasks = split_user_tasks("какой пароль?")
+    res = finalize_agent(
+        tasks,
+        [{"tool": "argus_ai", "args": {"binary": path, "for_task": 1}, "result": ai}],
+        binary=path,
+        store_memory=False,
+    )
+    assert res.task_statuses[0]["status"] == "done"
+    assert "SOSNEAKY" in (res.task_statuses[0]["detail"] or "")
+
+
 def test_finalize_blocks_false_unlock_success():
     tasks = split_user_tasks(
         "убери лицензию и еще поставь заголовок Kiko"
