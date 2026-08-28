@@ -18,12 +18,14 @@ dependencies = [
   "rich>=13",
   "networkx>=3",
   "numpy>=1.24",
+  "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 ml = ["torch>=2.0"]
 concrete = ["unicorn>=2.0"]
+memory = ["httpx>=0.27"]
 
 [project.scripts]
 argus = "argus.cli.main:main"

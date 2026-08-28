@@ -88,6 +88,36 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q
 | `argus.patch` | intents + UPX + verify |
 | `argus.ml` | ResGCN proposer (optional torch) |
 | `argus.prove` | certificates |
+| `argus.memory` | remote case memory client (vector search) |
+
+## Case memory (remote backend, **on by default**)
+
+Shared community experience at `https://argus.cloud.badkiko.ru` — enabled automatically after `pip install -e ".[memory]"`.
+
+**Privacy:** each `argus agent` run may **send** a structured report (binary SHA256 + basename, arch/format, your task text, tool strategies, outcome) and **fetch** similar past cases as hints. Raw binaries are never uploaded.
+
+```bash
+pip install -e ".[memory]"   # httpx
+
+# default — shared DB, notice printed once to stderr
+argus agent "unlock license" ./app
+
+# opt out for one run
+argus agent --no-memory "unlock license" ./app
+
+# opt out globally
+export ARGUS_MEMORY=0
+
+# own backend
+export ARGUS_MEMORY_URL=https://your-server.example
+```
+
+```bash
+argus memory search "stripped elf unlock"
+argus memory stats
+```
+
+Backend deploy: see [`argus-backend/README.md`](argus-backend/README.md).
 
 ## Non-goals (0.2.0)
 
