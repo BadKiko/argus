@@ -130,27 +130,9 @@ def render_agent_result(console: Console, res: AgentResult, *, show_trace: bool 
 
 def _launch_env(path: Path) -> tuple[str, dict[str, str]]:
     """Run from install dir with LD_LIBRARY_PATH so sibling .so resolve (e.g. BCompare/lib7z.so)."""
-    cwd = str(path.parent)
-    ld_path = cwd
-    try:
-        from argus.llm.session import get_session
+    from argus.binary.launch_env import launch_env_for
 
-        sess = get_session()
-        if sess.install_dir and Path(sess.install_dir).is_dir():
-            cwd = sess.install_dir
-            ld_path = sess.install_dir
-        elif sess.original_binary:
-            orig_parent = str(Path(sess.original_binary).resolve().parent)
-            cwd = orig_parent
-            ld_path = orig_parent
-    except Exception:
-        pass
-
-    env = os.environ.copy()
-    prev = env.get("LD_LIBRARY_PATH", "")
-    parts = [ld_path] + ([prev] if prev else [])
-    env["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys(p for p in parts if p))
-    return cwd, env
+    return launch_env_for(path)
 
 
 def _classify_launch(exit_code: Optional[int], stdout: str, stderr: str) -> str:
@@ -165,6 +147,8 @@ def _classify_launch(exit_code: Optional[int], stdout: str, stderr: str) -> str:
 
 
 def launch_failed(result: LaunchResult) -> bool:
+    if result.error_kind == "gui_running":
+        return False
     return not result.ok or bool(result.error_kind)
 
 
@@ -201,16 +185,31 @@ def run_patched_binary(console: Console, path: str, *, stdin: bytes = b"\n\n") -
         )
     )
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [str(p.resolve())],
-            input=stdin,
-            capture_output=True,
-            timeout=12,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=cwd,
             env=env,
         )
-        out = (proc.stdout or b"").decode("utf-8", errors="replace")
-        err = (proc.stderr or b"").decode("utf-8", errors="replace")
+        try:
+            out_b, err_b = proc.communicate(input=stdin, timeout=12)
+        except subprocess.TimeoutExpired:
+            console.print(
+                "[yellow]GUI-процесс всё ещё работает (диалог лицензии?) — "
+                "не убиваем; закрой окно вручную. Это не crash.[/yellow]"
+            )
+            return LaunchResult(
+                ok=False,
+                detail="gui still running after 12s (modal dialog?) — close manually",
+                cwd=cwd,
+                ld_library_path=ld_path,
+                timed_out=True,
+                error_kind="gui_running",
+            )
+        out = (out_b or b"").decode("utf-8", errors="replace")
+        err = (err_b or b"").decode("utf-8", errors="replace")
         text = out or err or "(no output)"
         if err and out:
             text = out + "\n--- stderr ---\n" + err

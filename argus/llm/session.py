@@ -31,6 +31,8 @@ class SessionContext:
     work_binary: str = ""
     install_dir: str = ""
     research_round: int = 0
+    last_investigate: Dict[str, Any] = field(default_factory=dict)
+    tools_tried: List[str] = field(default_factory=list)
 
 
 _current: Optional[SessionContext] = None
@@ -99,3 +101,36 @@ def cached_gate_scan(
     if sess.last_gate_scan_multi != multi:
         return None
     return dict(sess.last_gate_scan_full)
+
+
+def record_tool_call(name: str) -> None:
+    sess = get_session()
+    if name and name not in sess.tools_tried:
+        sess.tools_tried.append(name)
+
+
+def record_investigate(binary: str, payload: Dict[str, Any]) -> None:
+    sess = get_session()
+    sess.last_investigate = {k: v for k, v in (payload or {}).items() if k != "_slice_full"}
+    full = payload.get("_slice_full") or {}
+    if full:
+        record_gate_scan_result(
+            binary,
+            full.get("patch_plan") or [],
+            full=full,
+            query=(payload.get("find") or {}).get("query"),
+            multi=True,
+        )
+
+
+def investigation_hint() -> str:
+    """Short hint from last investigate for agent loop."""
+    sess = get_session()
+    inv = sess.last_investigate
+    if not inv:
+        return ""
+    tool = inv.get("suggested_next_tool") or ""
+    reason = inv.get("suggested_next_reason") or ""
+    if not tool:
+        return ""
+    return f"Investigation suggests: {tool} — {reason}"

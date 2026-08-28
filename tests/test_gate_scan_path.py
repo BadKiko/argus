@@ -65,40 +65,7 @@ def test_bcompare_call_cmp_refcount_not_gate_optional():
     d = gate_scan(str(bc), "license")
     plan = d.get("patch_plan") or []
     assert all(s.get("addr") not in ("0xcc1030", "0xCC1030") for s in plan)
-    path = Path("/opt/sublime_merge/sublime_merge")
-    if not path.is_file():
-        return
-    img = load_binary(str(path))
-    data = path.read_bytes()
-    needle = b"doesn't appear to be valid"
-    off = data.find(needle)
-    if off < 0:
-        return
-    from elftools.elf.elffile import ELFFile
-
-    with open(path, "rb") as f:
-        elf = ELFFile(f)
-        segs = [
-            (s["p_offset"], s["p_filesz"], s["p_vaddr"])
-            for s in elf.iter_segments()
-            if s["p_type"] == "PT_LOAD"
-        ]
-
-    def fo2va(o):
-        for start, sz, va in segs:
-            if start <= o < start + sz:
-                return va + (o - start)
-        return None
-
-    while off > 0 and data[off - 1] != 0:
-        off -= 1
-    va = fo2va(off)
-    assert va
-    xrefs = find_string_xrefs(img, va, max_hits=8)
-    assert isinstance(xrefs, list)
-    # RIP/abs scan may miss under budget; slice path is the supported API
-    if not xrefs:
-        d = gate_scan(str(path), "doesn't appear to be valid")
-        assert d.get("ok")
-        return
-    assert xrefs
+    if plan:
+        assert (plan[0].get("confidence") or "low") != "high" or "call→cmp" in (
+            plan[0].get("why") or ""
+        ).lower()

@@ -32,6 +32,18 @@ def openai_tool(name: str, description: str, properties: dict, required: Optiona
 
 ARGUS_TOOLS: List[dict] = [
     openai_tool(
+        "argus_investigate",
+        "Investigation-first: analyze + find + gate_scan + xrefs in one call. "
+        "Returns observations[], hypotheses[], suggested_next_tool. "
+        "Call at task start or when stuck before patching. Always pass for_task.",
+        {
+            "binary": {"type": "string", "description": "Work copy path"},
+            "query": {"type": "string", "description": "Keywords from user task"},
+            "task": {"type": "string", "description": "Optional full task text for intent routing"},
+        },
+        ["binary"],
+    ),
+    openai_tool(
         "argus_research",
         "Research when stuck: re-analyze binary, find strings, optional web hints. "
         "Call before giving up on a task. Always pass for_task.",
@@ -443,6 +455,9 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
 
     try:
         raw = _dispatch_tool_inner(name, arguments)
+        from argus.llm.session import record_tool_call
+
+        record_tool_call(name)
     except OSError as e:
         err = str(e)
         if e.errno == 26 or "Text file busy" in err or "ETXTBSY" in err:
@@ -504,6 +519,38 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         err = _require_binary(arguments)
         if err is not None:
             return err
+
+    if name == "argus_investigate":
+        from argus.llm.investigate import run_investigate
+        from argus.llm.session import get_session as _gs, record_investigate
+
+        _sess = _gs()
+        payload = run_investigate(
+            arguments["binary"],
+            arguments.get("query") or "",
+            original_binary=_sess.original_binary or None,
+            task_text=arguments.get("task") or arguments.get("query") or "",
+        )
+        record_investigate(arguments["binary"], payload)
+        return _truncate(
+            {
+                "ok": True,
+                "summary": payload.get("summary"),
+                "observations": payload.get("observations") or [],
+                "hypotheses": payload.get("hypotheses") or [],
+                "suggested_next_tool": payload.get("suggested_next_tool"),
+                "suggested_next_reason": payload.get("suggested_next_reason"),
+                "intent": payload.get("intent"),
+                "analyze": payload.get("analyze"),
+                "find": payload.get("find"),
+                "slice": payload.get("slice"),
+                "xref_previews": payload.get("xref_previews") or [],
+                "next_hint": payload.get("next_hint"),
+                "evidence": payload.get("evidence") or {},
+                "verify": {"kind": "none", "ok": None},
+            },
+            limit=16000,
+        )
 
     if name == "argus_research":
         from argus.llm.research import run_research_tool
@@ -820,6 +867,14 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             modules=modules,
             multi=bool(multi),
         )
+        previews = d.get("patch_site_previews") or []
+        slice_obs = [
+            f"plan={len(d.get('patch_plan') or [])} gates={len(d.get('gate_candidates') or [])}",
+        ]
+        if previews and previews[0].get("disasm"):
+            slice_obs.append(
+                "primary disasm: " + " | ".join(previews[0]["disasm"][:2])
+            )
         return _truncate(
             {
                 "ok": True,
@@ -831,10 +886,13 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 "per_module": d.get("per_module") or [],
                 "gate_candidates": d.get("gate_candidates") or [],
                 "patch_plan": d.get("patch_plan") or [],
+                "patch_site_previews": previews,
+                "observations": slice_obs,
                 "string_hits": d.get("string_hits") or [],
                 "evidence": {
                     "gate_candidates": d.get("gate_candidates") or [],
                     "patch_plan": d.get("patch_plan") or [],
+                    "patch_site_previews": d.get("patch_site_previews") or [],
                     "string_hits": d.get("string_hits") or [],
                     "modules": d.get("modules") or [binary],
                     "pivoted": d.get("pivoted"),
@@ -860,10 +918,23 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             query=arguments.get("query"),
             modules=modules,
         )
+        verify = d.get("verify") or {}
+        behavior = verify.get("patch_behavior") or {}
+        observations = [
+            f"plan_source={d.get('plan_source')} steps={len(d.get('applied') or [])}/{len(d.get('patch_plan') or [])}",
+            f"verify.kind={verify.get('kind')} verify.ok={verify.get('ok')}",
+        ]
+        if behavior.get("ran"):
+            observations.append(
+                f"behavior: ok={behavior.get('ok')} method={behavior.get('method')} detail={behavior.get('detail')}"
+            )
+        elif behavior.get("skipped"):
+            observations.append(f"behavior skipped: {behavior.get('detail')}")
         return _truncate(
             {
                 "ok": bool(d.get("ok")),
                 "summary": d.get("summary"),
+                "observations": observations,
                 "next_hint": d.get("next_hint"),
                 "plan_source": d.get("plan_source"),
                 "slice_plan_len": d.get("slice_plan_len"),

@@ -258,6 +258,16 @@ def open_tasks_hint(tasks: List[UserTask], tool_trace: List[Dict[str, Any]]) -> 
         )
     if "argus_research" not in tools_seen and len(tool_trace) >= 4:
         hints.append("Consider argus_research(query=<problem>) before repeating failed tools.")
+    if "argus_investigate" not in tools_seen:
+        hints.append("Start or refresh: argus_investigate(query=<task keywords>) for observations + next tool.")
+    try:
+        from argus.llm.session import investigation_hint
+
+        inv = investigation_hint()
+        if inv:
+            hints.append(inv)
+    except Exception:
+        pass
     return "\n".join(hints)
 
 
@@ -317,17 +327,21 @@ def _slice_plan_in_trace(
     return best > 0, best
 
 
-def _patch_verify_ok(payload: Dict[str, Any]) -> bool:
+def _patch_verify_ok(payload: Dict[str, Any], *, gate_task: bool = False) -> bool:
     verify = payload.get("verify") or {}
     if verify.get("ok") is not True:
         return False
     kind = verify.get("kind") or ""
+    behavior = verify.get("patch_behavior") or {}
     if kind == "patch_composite":
-        behavior = verify.get("patch_behavior") or {}
         if behavior.get("ran") and behavior.get("ok") is not True:
+            return False
+        if gate_task and (behavior.get("skipped") or not behavior.get("ran")):
             return False
         bytes_v = verify.get("patch_bytes") or {}
         return bytes_v.get("ok") is True
+    if gate_task and kind == "patch_bytes":
+        return False
     return kind in ("patch_bytes", "patch_composite", "")
 
 
@@ -511,6 +525,8 @@ def _evaluate_tasks(
     out: List[TaskStatus] = []
     for t in tasks:
         evs = events.get(t.id) or []
+        ui_ok = bool(_UI_HINT_RX.search(t.text))
+        gate_task = bool(_GATE_HINT_RX.search(t.text))
         if not evs:
             out.append(
                 _emit_task_status(
@@ -553,7 +569,7 @@ def _evaluate_tasks(
                 continue
 
             if _is_apply_plan(entry):
-                vok = _patch_verify_ok(payload)
+                vok = _patch_verify_ok(payload, gate_task=gate_task)
                 vkind = (payload.get("verify") or {}).get("kind") or ""
                 plan_ok = _plan_sourced_apply(payload)
                 had_slice_plan, _ = _slice_plan_in_trace(tool_trace, task_id=t.id)
@@ -605,9 +621,6 @@ def _evaluate_tasks(
             if not weak:
                 had_weak_only = False
             last_ok_detail = summary or entry.get("tool") or "ok"
-
-        ui_ok = bool(_UI_HINT_RX.search(t.text))
-        gate_task = bool(_GATE_HINT_RX.search(t.text))
 
         from argus.llm.intent import TaskKind, classify_task_intent
 

@@ -47,7 +47,6 @@ _VALIDATE_BOOST = {
     "has been invalidated": 50,
     "invalid license": 55,
     "invalid serial": 55,
-    "BEGIN LICENSE": 55,
     "license key": 25,
     "activation": 20,
     "not a valid": 40,
@@ -56,6 +55,45 @@ _VALIDATE_BOOST = {
 _LARGE_FN = 0x800
 _MAX_COVER_STUB = 0x1800  # bigger → likely UI/app shell; stubbing entry kills launch
 _PARSER_FN = 0xC00
+
+
+def _is_format_marker_string(text: str) -> bool:
+    """Section/header rodata — not an executable validation failure path."""
+    s = (text or "").strip()
+    if not s or len(s) > 96:
+        return False
+    compact = s.replace("-", "").replace("_", " ")
+    words = compact.split()
+    if len(words) <= 5 and compact.isupper():
+        return True
+    if len(words) == 2 and words[0] in ("BEGIN", "END", "START", "STOP") and words[1].isupper():
+        return True
+    if s.startswith("---") and s.endswith("---"):
+        return True
+    return False
+
+
+def _structural_gate_reason(reason: str) -> bool:
+    r = (reason or "").lower()
+    return any(
+        k in r
+        for k in (
+            "call→cmp",
+            "cmp==1",
+            "cmp eax, 1",
+            "after call",
+            "after test",
+            "jcc",
+        )
+    )
+
+
+def _structural_cands_near(img, xref_va: int, *, window: int = 256) -> List[Dict[str, Any]]:
+    return [
+        c
+        for c in suggest_patches_near(img, xref_va, window=window)
+        if not c.get("ui_label_only") and _structural_gate_reason(c.get("reason") or "")
+    ]
 
 _PASSWORD_SUBS = [
     b"Password:",
@@ -240,17 +278,103 @@ def _password_crackme_gates(img, module_path: str) -> List[Dict[str, Any]]:
     return gates
 
 
-# Substrings safe to treat as "validate body lives here" (not generic chrome)
-_COVER_STUB_SUBS = {
-    "doesn't appear to be valid",
-    "does not appear to be valid",
-    "is no longer valid",
-    "has been invalidated",
-    "invalid license",
-    "invalid serial",
-    "BEGIN LICENSE",
-    "not a valid",
-}
+def _gate_confidence(g: Dict[str, Any]) -> str:
+    """high / medium / low — drives lazy module scan and agent hints."""
+    reason = (g.get("reason") or "").lower()
+    if "call→cmp==1" in reason:
+        return "high"
+    if g.get("kind") == "force_branch" and ("cmp==1" in reason or "call→cmp" in reason):
+        return "high"
+    preview = g.get("string_preview") or g.get("substr") or ""
+    if _is_format_marker_string(str(preview)):
+        return "low"
+    if "validate-covering" in reason:
+        return "medium" if g.get("structural_nearby") else "low"
+    if g.get("string_kind") in ("validate", "query") and not g.get("ui_label_only"):
+        return "medium"
+    return "low"
+
+
+def _step_confidence(step: Dict[str, Any]) -> str:
+    why = (step.get("why") or step.get("reason") or "").lower()
+    if step.get("confidence") in ("high", "medium", "low"):
+        return str(step["confidence"])
+    if "call→cmp==1" in why:
+        return "high"
+    if step.get("kind") == "force_branch" and "call→cmp" in why:
+        return "high"
+    if "validate-covering" in why:
+        return "medium" if step.get("structural_nearby") else "low"
+    return "medium"
+
+
+def plan_is_confident(plan: List[Dict[str, Any]]) -> bool:
+    """True when primary plan step is strong enough to skip linked-module rescan."""
+    if not plan:
+        return False
+    conf = _step_confidence(plan[0])
+    return conf == "high"
+
+
+def _disasm_at(img, addr: int, *, before: int = 2, after: int = 4) -> List[str]:
+    import capstone as cs
+
+    mode = cs.CS_MODE_64 if getattr(img, "bits", 64) == 64 else cs.CS_MODE_32
+    md = cs.Cs(cs.CS_ARCH_X86, mode)
+    start = max(0, addr - 0x40)
+    data = img.read_bytes(start, 0x80)
+    if not data:
+        return []
+    insns = list(md.disasm(data, start))
+    idx = next((i for i, ins in enumerate(insns) if ins.address == addr), None)
+    if idx is None:
+        idx = next((i for i, ins in enumerate(insns) if ins.address >= addr), 0)
+    lo = max(0, idx - before)
+    hi = min(len(insns), idx + after + 1)
+    out: List[str] = []
+    for ins in insns[lo:hi]:
+        mark = ">" if ins.address == addr else " "
+        out.append(f"{mark} {ins.address:#x}: {ins.mnemonic} {ins.op_str}".rstrip())
+    return out
+
+
+def patch_site_previews(
+    plan: List[Dict[str, Any]],
+    *,
+    modules: Optional[Dict[str, Any]] = None,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """Disasm context at each patch step for LLM grounding."""
+    mods = modules or {}
+    out: List[Dict[str, Any]] = []
+    for step in plan[:limit]:
+        mod = str(step.get("module") or "")
+        img = mods.get(mod)
+        if img is None and mod:
+            try:
+                img = load_binary(mod)
+                mods[mod] = img
+            except Exception:
+                img = None
+        addr_raw = step.get("addr")
+        disasm: List[str] = []
+        if img is not None and addr_raw:
+            try:
+                disasm = _disasm_at(img, int(addr_raw, 0))
+            except (TypeError, ValueError):
+                pass
+        conf = _step_confidence(step)
+        out.append(
+            {
+                "addr": addr_raw,
+                "kind": step.get("kind"),
+                "module": mod or None,
+                "why": step.get("why"),
+                "confidence": conf,
+                "disasm": disasm,
+            }
+        )
+    return out
 
 
 def _find_cstring_vas(img, substr: bytes, limit: int = 6) -> List[Tuple[int, bytes]]:
@@ -482,6 +606,8 @@ def build_patch_plan(
             "nearby_fn": g.get("nearby_fn"),
             "xref_addr": g.get("xref_addr"),
             "module": g.get("module"),
+            "confidence": _gate_confidence(g),
+            "structural_nearby": bool(g.get("structural_nearby")),
         }
         if g.get("kind") == "force_branch":
             step["taken"] = bool(g.get("taken", False))
@@ -504,6 +630,8 @@ def build_patch_plan(
                 continue
             reason = (g.get("reason") or "").lower()
             if "validate-covering" in reason:
+                if not g.get("structural_nearby"):
+                    continue
                 if "size=0x" in reason:
                     try:
                         hx = reason.split("size=0x", 1)[1].split()[0]
@@ -541,7 +669,7 @@ def build_patch_plan(
             primary = non_ui[0]
 
     if primary:
-        add(primary, primary.get("reason") or "primary license gate", 1)
+        add(primary, primary.get("reason") or "primary gate", 1)
 
     # Wire fail-jcc: same xref as primary, different addr, force_branch
     if primary and primary.get("kind") == "ret_imm":
@@ -641,19 +769,22 @@ def gate_scan(
     gates: List[Dict[str, Any]] = []
     seen_gate: set[str] = set()
 
-    # Large covering functions of *specific* validate strings → ret_imm at fn start
-    # Cap size: stubbing a 13KB UI shell (e.g. generic ACTIVATION) prevents launch.
+    # Large covering functions near structural predicates → ret_imm at fn start
+    # Cap size: stubbing a large UI shell prevents launch.
     for sh in scan_hits:
         if sh.get("kind") not in ("validate", "query"):
             continue
-        substr = sh.get("substr") or ""
-        if substr not in _COVER_STUB_SUBS and not any(s in substr for s in _COVER_STUB_SUBS):
+        preview = sh.get("preview") or sh.get("substr") or ""
+        if _is_format_marker_string(str(preview)):
             continue
         sva = int(sh["addr"], 0)
         for xr in xref_map.get(sva) or []:
             try:
                 xref_va = int(xr["addr"], 0)
             except (TypeError, ValueError):
+                continue
+            structural = _structural_cands_near(img, xref_va)
+            if not structural and sh.get("kind") != "query":
                 continue
             cov = function_covering(img, xref_va)
             if not cov:
@@ -665,9 +796,12 @@ def gate_scan(
             if key in seen_gate:
                 continue
             seen_gate.add(key)
+            substr = sh.get("substr") or ""
             score = 400 + _boost_for_substr(substr)
             if sz >= 0x1000:
                 score += 20
+            if structural:
+                score += 80
             gates.append(
                 {
                     "kind": "ret_imm",
@@ -682,9 +816,10 @@ def gate_scan(
                     "string_kind": sh.get("kind"),
                     "string_preview": sh.get("preview"),
                     "xref_addr": xr["addr"],
+                    "structural_nearby": bool(structural),
                 }
             )
-            for c in suggest_patches_near(img, xref_va, window=256):
+            for c in structural or suggest_patches_near(img, xref_va, window=256):
                 ck = f"{c.get('kind')}:{c.get('addr')}"
                 if ck in seen_gate:
                     continue
@@ -818,6 +953,7 @@ def gate_scan(
     gates.sort(key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True)))
     for g in gates:
         g["module"] = module_path
+        g["confidence"] = _gate_confidence(g)
     # Keep a wider pool for plan building, then trim display list
     pool = gates[: max(limit * 2, 24)]
     gates_out = gates[:limit]
@@ -825,21 +961,28 @@ def gate_scan(
     patch_plan = build_patch_plan(pool, max_steps=5)
     for s in patch_plan:
         s.setdefault("module", module_path)
+    previews = patch_site_previews(patch_plan, modules={module_path: img})
 
     if patch_plan:
         s0 = patch_plan[0]
+        conf = s0.get("confidence") or _step_confidence(s0)
         if s0.get("string_kind") == "password" or s0.get("nearby_fn") == "authenticate":
             next_hint = (
                 f"PASSWORD crackme: argus_apply_plan patch_plan ({len(patch_plan)} steps); "
                 f"first {s0.get('kind')} addr={s0.get('addr')} (authenticate stub). "
                 f"Not a gate transform — behavior verify must pass."
             )
+        elif conf == "low":
+            next_hint = (
+                f"WEAK plan (confidence={conf}) — likely template/parser gate. "
+                f"PIVOT: argus_slice multi=true to scan linked SO/DLL, or argus_discover. "
+                f"First step {s0.get('kind')} addr={s0.get('addr')}."
+            )
         else:
             next_hint = (
                 f"APPLY: argus_apply_plan with patch_plan ({len(patch_plan)} steps); "
-                f"first {s0.get('kind')} addr={s0.get('addr')}. "
-                f"Do not freestyle-patch parser gates outside the plan. "
-                f"Success = patch_bytes verify only (rodata Unregistered may remain)."
+                f"first {s0.get('kind')} addr={s0.get('addr')} confidence={conf}. "
+                f"Success requires verify.ok with behavior smoke (not bytes-only)."
             )
     elif non_ui:
         pick = non_ui[0]
@@ -867,6 +1010,7 @@ def gate_scan(
         "string_hits": hits[:24],
         "gate_candidates": gates_out,
         "patch_plan": patch_plan,
+        "patch_site_previews": previews,
         "suggested_stubs": [
             {
                 "name": g.get("nearby_fn"),
@@ -994,8 +1138,9 @@ def gate_scan_modules(
 
     patch_plan = _plan_from_gates()
 
-    # Primary already has a plan → skip expensive scans of low-value linked modules
-    if not patch_plan and extras:
+    # Scan linked modules when plan empty OR primary plan is weak (template-only covering)
+    scan_extras = bool(extras) and (not patch_plan or not plan_is_confident(patch_plan))
+    if scan_extras:
         _slice_parallel(extras)
         patch_plan = _plan_from_gates()
 
@@ -1020,14 +1165,24 @@ def gate_scan_modules(
             s.setdefault("module", primary)
 
     non_ui = [g for g in all_gates[:limit] if not g.get("ui_label_only")]
+    mod_imgs: Dict[str, Any] = {}
+    previews = patch_site_previews(patch_plan, modules=mod_imgs)
     if patch_plan:
         s0 = patch_plan[0]
+        conf = s0.get("confidence") or _step_confidence(s0)
         pivot_note = f" (pivoted into {widened_from[0]})" if pivoted and widened_from else ""
-        next_hint = (
-            f"APPLY: argus_apply_plan patch_plan ({len(patch_plan)} steps); "
-            f"first {s0.get('kind')} addr={s0.get('addr')} module={s0.get('module')}"
-            f"{pivot_note}. Patches apply per-module."
-        )
+        if conf == "low":
+            next_hint = (
+                f"WEAK plan confidence={conf} — scan linked modules or pivot. "
+                f"first {s0.get('kind')} addr={s0.get('addr')} module={s0.get('module')}"
+                f"{pivot_note}."
+            )
+        else:
+            next_hint = (
+                f"APPLY: argus_apply_plan patch_plan ({len(patch_plan)} steps); "
+                f"first {s0.get('kind')} addr={s0.get('addr')} module={s0.get('module')} "
+                f"confidence={conf}{pivot_note}. Behavior verify required for done."
+            )
     elif pivoted:
         next_hint = (
             "Pivoted across nearby binaries — still no patch_plan. "
@@ -1046,7 +1201,8 @@ def gate_scan_modules(
             f"gate_scan_modules modules={len(per_module)} gates={len(all_gates[:limit])} "
             f"plan={len(patch_plan)}"
             + (" pivoted" if pivoted else "")
-            + (" lazy" if extras and patch_plan and len(per_module) == 1 else "")
+            + (" lazy" if extras and plan_is_confident(patch_plan) and len(per_module) == 1 else "")
+            + (" widened_modules" if scan_extras and len(per_module) > 1 else "")
         ),
         "primary": primary,
         "modules": [pm["module"] for pm in per_module if pm.get("ok")] or paths,
@@ -1056,6 +1212,7 @@ def gate_scan_modules(
         "string_hits": all_hits[:24],
         "gate_candidates": all_gates[:limit],
         "patch_plan": patch_plan,
+        "patch_site_previews": previews,
         "next_hint": next_hint,
         "module": primary,
     }

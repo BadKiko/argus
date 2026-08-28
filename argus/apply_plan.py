@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from argus.ask import Hint, PatchKind, Want, ask
 from argus.binary import load_binary
+from argus.binary.launch_env import launch_env_for
 from argus.find_slice import gate_scan, gate_scan_modules
 from argus.llm.session import strict_plan_enabled, cached_gate_scan
 
@@ -23,7 +24,22 @@ _BEHAVIOR_DENY = (
     b"invalid license",
     b"unregistered",
     b"trial expired",
+    b"trial mode",
+    b"trial information",
+    b"missing or corrupt",
+    b"not a valid",
+    b"evaluation error",
+    b"license error",
+    b"error =",
 )
+_UNICORN_MAX_BYTES = 512 * 1024
+
+
+def _behavior_max_bytes() -> int:
+    raw = os.environ.get("ARGUS_BEHAVIOR_MAX_BYTES", "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return 128 * 1024 * 1024
 
 
 def _parse_addr(raw: Any) -> Optional[int]:
@@ -220,9 +236,9 @@ def verify_patch_behavior(
     *,
     allow_strings: Optional[List[str]] = None,
     stdin: bytes = b"nope\nnope\n",
-    max_bytes: int = 512 * 1024,
+    max_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Smoke-run patched binary; fail on denylist strings in stdout."""
+    """Smoke-run patched binary; fail on denylist strings in stdout/stderr."""
     p = Path(patched)
     if not p.is_file():
         return {
@@ -231,23 +247,27 @@ def verify_patch_behavior(
             "detail": "patched file missing",
             "ran": False,
         }
+    size_limit = max_bytes if max_bytes is not None else _behavior_max_bytes()
     try:
-        if p.stat().st_size > max_bytes:
-            return {
-                "kind": "patch_behavior",
-                "ok": False,
-                "detail": "binary too large for behavior smoke",
-                "ran": False,
-                "skipped": True,
-            }
+        fsize = p.stat().st_size
     except OSError as e:
         return {"kind": "patch_behavior", "ok": False, "detail": str(e), "ran": False}
+    if fsize > size_limit:
+        return {
+            "kind": "patch_behavior",
+            "ok": False,
+            "detail": f"binary too large for behavior smoke ({fsize} > {size_limit})",
+            "ran": False,
+            "skipped": True,
+        }
 
     stdout = b""
+    stderr = b""
     ran = False
     method = ""
+    timed_out = False
 
-    if _behavior_verify_enabled():
+    if _behavior_verify_enabled() and fsize <= _UNICORN_MAX_BYTES:
         try:
             from argus.concrete.runner import concrete_run, unicorn_available
 
@@ -261,15 +281,22 @@ def verify_patch_behavior(
             pass
 
     if not ran:
+        cwd, env = launch_env_for(p)
         try:
             proc = subprocess.run(
-                [str(p)],
+                [str(p.resolve())],
                 input=stdin,
                 capture_output=True,
                 timeout=8,
-                cwd=str(p.parent),
+                cwd=cwd,
+                env=env,
             )
             stdout = proc.stdout or b""
+            stderr = proc.stderr or b""
+            ran = True
+            method = "subprocess"
+        except subprocess.TimeoutExpired:
+            timed_out = True
             ran = True
             method = "subprocess"
         except Exception as e:
@@ -280,14 +307,25 @@ def verify_patch_behavior(
                 "ran": False,
             }
 
-    low = stdout.lower()
+    if timed_out:
+        return {
+            "kind": "patch_behavior",
+            "ok": False,
+            "detail": "process still running after 8s (trial/license GUI?)",
+            "ran": True,
+            "method": method,
+            "timed_out": True,
+        }
+
+    combined = stdout + b"\n" + stderr
+    low = combined.lower()
     for deny in _BEHAVIOR_DENY:
         if deny in low:
-            preview = stdout[:240].decode("utf-8", errors="replace")
+            preview = combined[:240].decode("utf-8", errors="replace")
             return {
                 "kind": "patch_behavior",
                 "ok": False,
-                "detail": f"stdout contains deny phrase {deny!r}",
+                "detail": f"output contains deny phrase {deny!r}",
                 "stdout_preview": preview,
                 "ran": True,
                 "method": method,
@@ -295,12 +333,12 @@ def verify_patch_behavior(
 
     allow_ok = True
     if allow_strings:
-        allow_ok = any(s.encode() in stdout for s in allow_strings if s)
-    preview = stdout[:240].decode("utf-8", errors="replace")
+        allow_ok = any(s.encode() in combined for s in allow_strings if s)
+    preview = combined[:240].decode("utf-8", errors="replace")
     return {
         "kind": "patch_behavior",
         "ok": bool(allow_ok),
-        "detail": "behavior smoke ok" if allow_ok else "stdout missing expected allow strings",
+        "detail": "behavior smoke ok" if allow_ok else "output missing expected allow strings",
         "stdout_preview": preview,
         "ran": True,
         "method": method,
@@ -310,14 +348,25 @@ def verify_patch_behavior(
 def _composite_verify(
     bytes_verify: Dict[str, Any],
     behavior_verify: Optional[Dict[str, Any]],
+    *,
+    require_behavior: bool = False,
 ) -> Dict[str, Any]:
     behavior = behavior_verify or {}
     behavior_ran = bool(behavior.get("ran"))
     behavior_ok = behavior.get("ok") is True
+    behavior_skipped = bool(behavior.get("skipped"))
     bytes_ok = bool(bytes_verify.get("ok"))
     if behavior_ran:
         ok = bytes_ok and behavior_ok
         detail = "bytes+behavior ok" if ok else "behavior or bytes verify failed"
+        kind = "patch_composite"
+    elif behavior_skipped and require_behavior:
+        ok = False
+        detail = behavior.get("detail") or "behavior verify skipped — insufficient for gate transform"
+        kind = "patch_composite"
+    elif require_behavior and bytes_ok:
+        ok = False
+        detail = "bytes ok but behavior verify did not run"
         kind = "patch_composite"
     else:
         ok = bytes_ok
@@ -506,7 +555,8 @@ def apply_plan(
             elif isinstance(hit, str):
                 allow.append(hit)
         behavior_verify = verify_patch_behavior(primary_out, allow_strings=allow or None)
-    verify = _composite_verify(bytes_verify, behavior_verify)
+    require_behavior = bool(plan) and plan_source == "slice"
+    verify = _composite_verify(bytes_verify, behavior_verify, require_behavior=require_behavior)
     ok = bool(verify.get("ok")) and all(a.get("ok") for a in applied)
     primary_out = module_outs.get(path, out)
     certificate = certify_apply_plan(applied, verify)
@@ -527,9 +577,9 @@ def apply_plan(
         "certificate": certificate.to_dict(),
         "verification_level": verification_level,
         "next_hint": (
-            "patch verify ok — do not claim GUI licensed; rodata strings may remain"
+            "patch verify ok (bytes+behavior) — user must confirm GUI if modal"
             if ok
-            else "patch incomplete — inspect applied[].detail / try argus_discover + slice"
+            else "patch incomplete — inspect verify.patch_behavior / try argus_discover + slice"
         ),
         "evidence": {
             "patch_plan": plan,
