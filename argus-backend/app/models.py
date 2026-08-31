@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class VerificationLevel(str, Enum):
     UNKNOWN = "UNKNOWN"
+    USER_REPORTED = "USER_REPORTED"
     BYTES_VERIFIED = "BYTES_VERIFIED"
     EXECUTION_VERIFIED = "EXECUTION_VERIFIED"
     BEHAVIOR_VERIFIED = "BEHAVIOR_VERIFIED"

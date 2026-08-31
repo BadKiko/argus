@@ -77,20 +77,22 @@ def test_finalize_fauxware_false_unlock_trace_not_done():
 
 
 @pytest.mark.skipif(not FAUXWARE.is_file(), reason="samples/fauxware missing")
-def test_apply_plan_rejects_model_invented_steps():
+def test_apply_plan_rejects_model_invented_steps(monkeypatch):
+    monkeypatch.setenv("ARGUS_STRICT_PLAN", "1")
     invented = [{"kind": "force_branch", "addr": "0x4007bb", "taken": False}]
-    r = apply_plan(str(FAUXWARE), steps=invented)
+    r = apply_plan(str(FAUXWARE), steps=invented, auto_slice=True)
     assert r.get("ok") is False
     assert r.get("plan_source") == "rejected_model"
     assert r.get("verify", {}).get("ok") is False
 
 
 @pytest.mark.skipif(not FAUXWARE.is_file(), reason="samples/fauxware missing")
-def test_apply_plan_authenticate_slice_plan_succeeds(tmp_path):
+def test_apply_plan_authenticate_slice_plan_succeeds(tmp_path, monkeypatch):
     """Correct path: slice-derived authenticate ret_imm passes composite verify."""
+    monkeypatch.setenv("ARGUS_STRICT_PLAN", "1")
     out = str(tmp_path / "fauxware.patched")
     steps = [{"kind": "ret_imm", "addr": "0x4006e6", "value": 1}]
-    r = apply_plan(str(FAUXWARE), output=out, steps=steps, multi=False)
+    r = apply_plan(str(FAUXWARE), output=out, steps=steps, multi=False, auto_slice=True)
     if r.get("plan_source") == "rejected_model":
         pytest.skip("fauxware slice plan does not include authenticate ret_imm in this build")
     assert r.get("ok") is True, r

@@ -10,7 +10,9 @@ from typing import Any, Dict, List, Optional
 from argus.binary import load_binary
 
 _GATE_SIGNAL_RX = re.compile(
-    r"(unlock|license|лиценз|активац|register|unregistered|trial|serial|"
+    r"(unlock|license|лиценз|активац|активир|register|unregistered|trial|serial|"
+    r"restriction|entitlement|activation|verify|check|gate|transform|"
+    r"\bключ\b|license\s*key|any\s*key|"
     r"убери\s+про|remove\s+licen|bypass\s+licen|crack\s+licen)",
     re.IGNORECASE,
 )
@@ -156,39 +158,79 @@ def is_bypass_license_task(text: str) -> bool:
     return bool(_BYPASS_GATE_SIGNAL_RX.search(text or ""))
 
 
+def task_signals(
+    task_text: str,
+    *,
+    binary: Optional[str] = None,
+    discover: Optional[Dict[str, Any]] = None,
+) -> Dict[str, float]:
+    """Soft signal scores for the LLM — not routing decisions."""
+    text = (task_text or "").strip()
+    binary_signals = _binary_signals(binary) if binary else {}
+    gate = 0.0
+    password = 0.0
+    ui = 0.0
+    if _GATE_SIGNAL_RX.search(text):
+        gate += 0.75
+    if _PASSWORD_RX.search(text):
+        password += 0.75
+    if _UI_RX.search(text):
+        ui += 0.7
+    if binary_signals.get("license_strings"):
+        gate += 0.35
+    if binary_signals.get("password_crackme"):
+        password += 0.4
+    if binary_signals.get("authenticate_symbol"):
+        password += 0.25
+    if is_bypass_license_task(text):
+        gate += 0.2
+    if is_bypass_password_task(text):
+        password += 0.2
+    return {
+        "gate_transform": min(1.0, gate),
+        "password": min(1.0, password),
+        "patch_ui": min(1.0, ui),
+        "general": max(0.0, 1.0 - min(1.0, gate + password + ui)),
+    }
+
+
+def format_task_signals(
+    task_text: str,
+    *,
+    binary: Optional[str] = None,
+    discover: Optional[Dict[str, Any]] = None,
+) -> str:
+    sig = task_signals(task_text, binary=binary, discover=discover)
+    kind = classify_task_intent(task_text, binary=binary, discover=discover)
+    return (
+        f"task_signals (hints only, not ground truth): {sig} "
+        f"legacy_kind={kind.value}"
+    )
+
+
 def routing_hint(
     task_text: str,
     *,
     binary: Optional[str] = None,
     discover: Optional[Dict[str, Any]] = None,
 ) -> str:
-    kind = classify_task_intent(task_text, binary=binary, discover=discover)
-    if kind == TaskKind.PASSWORD:
-        if _PASSWORD_Q_RX.search(task_text or ""):
-            return (
-                "Task routing: PASSWORD question — ONE argus_ai(prompt=<exact user task>); "
-                "symbolic solve returns stdin/password. Do NOT lift/deobf/solve-spam."
-            )
-        if is_bypass_password_task(task_text or ""):
-            return (
-                "Task routing: BYPASS password (accept any) — argus_slice → argus_apply_plan "
-                "by patch_plan; ret_imm on authenticate alone may fail behavior verify."
-            )
-        return (
-            "Task routing: PASSWORD crackme (not gate transform) — use argus_ai/ask password "
-            "path or patch authenticate; do NOT use argus_apply_plan for license gates."
+    """Neutral workflow examples — LLM chooses tools."""
+    sig = task_signals(task_text, binary=binary, discover=discover)
+    parts = [format_task_signals(task_text, binary=binary, discover=discover)]
+    parts.append(
+        "RE workflow (examples): observe (find/xrefs/disasm) → hypothesize → "
+        "diagnose_failure(error_text=<verbatim from user or sandbox>) → "
+        "apply_plan(steps=<from evidence>) → verify."
+    )
+    if sig.get("password", 0) > sig.get("gate_transform", 0):
+        parts.append(
+            "Password-like signals: consider argus_ai, argus_solve, or authenticate xref — verify with behavior."
         )
-    if kind == TaskKind.GATE_TRANSFORM:
-        if is_bypass_license_task(task_text or ""):
-            return (
-                "Task routing: BYPASS gate signal (accept any key) — argus_slice on work binary "
-                "(install-dir modules via modules=[] if plan=0), then ONE argus_apply_plan "
-                "from patch_plan only; discover root = install dir, NOT workspace cache."
-            )
-        return (
-            "Task routing: GATE TRANSFORM — require argus_slice with non-empty patch_plan, "
-            "then ONE argus_apply_plan (no custom steps unless copied from slice JSON)."
+    elif sig.get("patch_ui", 0) > 0.5:
+        parts.append("UI-like signals: argus_find + argus_patch replace_string (new len ≤ old).")
+    elif sig.get("gate_transform", 0) > 0.4:
+        parts.append(
+            "Gate-like signals: find error text → diagnose_failure → small apply_plan batches from corrective_patch."
         )
-    if kind == TaskKind.PATCH_UI:
-        return "Task routing: UI/patch — use argus_patch replace_string or weak UI xref; not apply_plan."
-    return ""
+    parts.append("Never invent addresses; error_text must be verbatim from user, sandbox, or find hits.")
+    return "\n".join(parts)

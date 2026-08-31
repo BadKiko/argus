@@ -47,7 +47,7 @@ def test_apply_plan_reuses_session_slice_cache():
         raise AssertionError("gate_scan_modules should not run when cache warm")
 
     with patch("argus.apply_plan.gate_scan_modules", side_effect=boom):
-        apply_plan(fw, query="license", multi=True)
+        apply_plan(fw, query="license", multi=True, auto_slice=True)
     assert not calls
 
 
@@ -79,7 +79,7 @@ def test_gate_scan_modules_lazy_skips_extras_when_primary_has_plan(tmp_path):
                         "score": 500,
                         "ui_label_only": False,
                         "ret_guess": 1,
-                        "reason": "test",
+                        "reason": "call→cmp==1 large callee size=0x900",
                     }
                 ],
                 "patch_plan": [

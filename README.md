@@ -14,7 +14,7 @@ It is **not** a license cracker and **not** a Ghidra clone with a chat box. It i
 |-----------|------------|
 | Understand a stripped ELF/PE | Find strings, xrefs, lift pseudo-C, recover CFG |
 | Change behavior safely | Build a `patch_plan`, apply it, verify bytes + smoke behavior |
-| Solve a crackme / password | Symbolic / concolic solve (`argus ai` / agent) |
+| Solve a crackme / password | Symbolic / concolic solve (`argus agent` / `solve`) |
 | Deobfuscate OLLVM-style CFF | Unflatten + optional patch + verify |
 | Reuse past experience | Optional shared case memory (hints, not ground truth) |
 
@@ -35,10 +35,18 @@ Your task (NL)
 
 Core ideas:
 
-1. **Formats are adapters** — ELF/PE today; the agent thinks in tasks, not “PE-only recipes.”
-2. **Prose never finishes a task** — status comes from tool results (`verify.ok`, slice-sourced plan, etc.).
-3. **Gate transform pipeline** — `argus_slice` → `patch_plan` → `argus_apply_plan` → verify. Freestyle gate patches alone do not complete those tasks.
-4. **Memory is RAG** — similar past cases are hints; you still must verify locally.
+1. **True Dual-Engine Cross-Platform (Linux & Windows Parity)**:
+   - **Linux Engine**: ELF64/32, DWARF, `.eh_frame` unwind tables, GNU ABI, PLT/GOT resolution, `LD_LIBRARY_PATH` sibling library loading.
+   - **Windows Engine**: PE32/PE32+, `.pdata` x64 Runtime Function directories ($O(1)$ function discovery), Win64 ABI, IAT/EAT resolution, Windows `PATH` DLL resolution, native PE `.exe` smoke execution verification.
+2. **High-Performance Scalable Architecture**:
+   - Zero-allocation `SparseMemory` section slicing instead of multi-gigabyte flat dictionary representations (scales seamlessly to 50MB–100MB+ desktop binaries).
+   - Vectorized NumPy xref & rodata scanning running in milliseconds over commercial desktop applications.
+   - Fast-path Capstone disassembly with candidate operand filtering.
+3. **Formats are adapters** — ELF/PE; the agent thinks in tasks, not format-specific workarounds.
+4. **Prose never finishes a task** — status comes from tool results (`verify.ok`, slice-sourced plan, etc.).
+5. **Gate transform pipeline** — `argus_slice` → `patch_plan` → `argus_apply_plan` → verify. Freestyle gate patches alone do not complete those tasks.
+6. **Dynamic Tool Synthesis & Extensibility** — When built-in tools are insufficient or stuck, the agent can invoke `argus_exec` to dynamically write custom Python scripts (leveraging `argus`, `pefile`, `capstone`, `z3`) or execute shell commands (`pip install`, `curl`) to download or create the exact tools it needs.
+7. **Memory is RAG** — similar past cases are hints; you still must verify locally.
 
 Longer vision: [docs/ARGUS_VISION.md](docs/ARGUS_VISION.md).
 
@@ -60,24 +68,16 @@ CLI entry point: `argus`.
 
 ## Quick start
 
-### 1. Natural language (no cloud LLM)
-
-Regex / local router — good for smoke tests:
-
-```bash
-argus ai "дай пароль для админа" samples/fauxware_fla
-```
-
-### 2. Real agent (recommended)
+### 1. LLM Agent (recommended)
 
 **Gemini (AI Studio)** — get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey):
 
 ```bash
 export GEMINI_API_KEY="AIza..."
 export ARGUS_LLM_PROVIDER=gemini
-export ARGUS_GEMINI_MODEL=gemini-2.0-flash
+export ARGUS_GEMINI_MODEL=gemini-3.5-flash-lite
 
-argus agent --provider gemini "дай пароль для админа" samples/fauxware_fla -v
+argus agent --provider gemini "найди и проанализируй логику проверки" samples/fauxware_fla -v
 ```
 
 **OpenAI-compatible** (OpenAI, OpenRouter, Gemini OpenAI shim):
@@ -85,14 +85,14 @@ argus agent --provider gemini "дай пароль для админа" samples/
 ```bash
 export ARGUS_OPENAI_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/"
 export ARGUS_OPENAI_API_KEY="AIza..."
-export ARGUS_OPENAI_MODEL="gemini-2.0-flash"
+export ARGUS_OPENAI_MODEL="gemini-3.5-flash-lite"
 
-argus agent --provider openai "дай пароль" samples/fauxware -v
+argus agent --provider openai "найди и проанализируй логику проверки" samples/fauxware -v
 ```
 
 The agent discovers related modules if needed, only patches a **work copy**, and finalizes tasks from tool evidence.
 
-### 3. Classic CLI
+### 2. Classic CLI
 
 ```bash
 argus analyze samples/fauxware
@@ -141,6 +141,21 @@ Backend deploy: [argus-backend/README.md](argus-backend/README.md).
 | `argus.prove` | Certificates / verification levels |
 | `argus.memory` | Remote case memory client |
 | `argus.ir` | Format-agnostic IR skeleton |
+
+---
+
+## Agent contract (0.4)
+
+Before the first LLM step, Argus runs a **deterministic bootstrap** (`investigate` + optional `decision_flow`) and injects `BOOTSTRAP REPORT` + `NEXT_ACTION` into the prompt. Weak models (`gemini-*-flash-lite`, `ARGUS_WEAK_MODEL=1`) get a short SYSTEM prompt.
+
+| Rule | Behavior |
+|------|----------|
+| Gate transform done | `argus_slice` plan + `argus_apply_plan` with `verify.ok` and positive behavior oracle |
+| Freestyle patch | Never closes gate tasks |
+| `argus_exec` | Python-only by default; scripts in workspace `.argus-exec` |
+| Verify levels | `BYTES` → `EXECUTION` → `BEHAVIOR` → `FORMAL` (smoke ≠ formal) |
+
+See [PLAN_0.5.0.md](PLAN_0.5.0.md) (agent: LLM plans, tools observe).
 
 ---
 

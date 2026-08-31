@@ -140,11 +140,12 @@ def test_ask_ret_imm_and_default_patched_suffix(tmp_path):
     assert Path(r.patched_path).exists()
 
 
-def test_refuse_stub_main():
+def test_refuse_stub_main(tmp_path):
     src = str(SAMPLES / "fauxware")
+    out = str(tmp_path / "argus_no_stub_main.bin")
     r = ask(
         src,
-        Hint(want=Want.PATCH, patch_kind=PatchKind.ALWAYS_TRUE, function="main", output="/tmp/argus_no_stub_main.bin"),
+        Hint(want=Want.PATCH, patch_kind=PatchKind.ALWAYS_TRUE, function="main", output=out),
     )
     assert r.ok is False
     assert "refused" in (r.answer or "").lower() or any("refused" in n for n in r.notes)
@@ -180,6 +181,7 @@ def test_ret_imm_explicit_va_not_refused_as_main(tmp_path):
 def test_skip_check_still_patches_authenticate(tmp_path):
     import shutil
     import subprocess
+    import sys
 
     src = tmp_path / "fauxware"
     shutil.copy(SAMPLES / "fauxware", src)
@@ -196,8 +198,22 @@ def test_skip_check_still_patches_authenticate(tmp_path):
         ),
     )
     assert r.ok and out.exists()
-    p = subprocess.run([str(out)], input=b"x\ny\n", capture_output=True)
-    assert b"Welcome" in p.stdout
+    if sys.platform == "win32":
+        has_wsl = False
+        if shutil.which("wsl"):
+            try:
+                res = subprocess.run(["wsl", "--status"], capture_output=True, timeout=1.0)
+                has_wsl = (res.returncode == 0)
+            except Exception:
+                pass
+        if has_wsl:
+            drive = str(out)[0].lower()
+            wsl_path = f"/mnt/{drive}/" + str(out)[3:].replace("\\", "/")
+            p = subprocess.run(["wsl", wsl_path], input=b"x\ny\n", capture_output=True)
+            assert b"Welcome" in p.stdout
+    else:
+        p = subprocess.run([str(out)], input=b"x\ny\n", capture_output=True)
+        assert b"Welcome" in p.stdout
 
 
 def test_find_skips_zero_addr_symbols():
@@ -280,6 +296,9 @@ def test_safety_ok_on_authenticate_patch(tmp_path):
 
 
 def test_dispatch_missing_binary():
+    from argus.llm.session import reset_session
+
+    reset_session()
     raw = dispatch_tool("argus_analyze", {"binary": "/no/such/file/argus.bin"})
     data = json.loads(raw)
     assert data.get("ok") is False

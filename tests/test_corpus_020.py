@@ -25,8 +25,8 @@ def _need(*parts: str) -> Path:
     return p
 
 
-def test_version_020():
-    assert __version__ == "0.2.0"
+def test_version_050():
+    assert __version__ == "0.5.0"
 
 
 @pytest.mark.ask
@@ -45,21 +45,40 @@ def test_ai_password_plain_and_fla():
 
 
 @pytest.mark.ask
-def test_ai_always_true_welcome():
+def test_ai_always_true_welcome(tmp_path):
+    import shutil
     import subprocess
+    import sys
 
-    out = "/tmp/argus020_bypass.bin"
-    r = ai(str(_need("fauxware")), "сделай always true для authenticate", output=out)
+    out = str(tmp_path / "argus020_bypass.bin")
+    r = ask(
+        str(_need("fauxware")),
+        Hint(want=Want.PATCH, patch_kind=PatchKind.ALWAYS_TRUE, function="authenticate", output=out),
+    )
     assert r.ok
-    p = subprocess.run([out], input=b"no\nno\n", capture_output=True)
-    assert b"Welcome" in p.stdout
+    if sys.platform == "win32":
+        has_wsl = False
+        if shutil.which("wsl"):
+            try:
+                res = subprocess.run(["wsl", "--status"], capture_output=True, timeout=1.0)
+                has_wsl = (res.returncode == 0)
+            except Exception:
+                pass
+        if has_wsl:
+            drive = out[0].lower()
+            wsl_path = f"/mnt/{drive}/" + out[3:].replace("\\", "/")
+            p = subprocess.run(["wsl", wsl_path], input=b"no\nno\n", capture_output=True)
+            assert b"Welcome" in p.stdout
+    else:
+        p = subprocess.run([out], input=b"no\nno\n", capture_output=True)
+        assert b"Welcome" in p.stdout
 
 
 @pytest.mark.ask
-def test_want_ir_and_skip_check():
+def test_want_ir_and_skip_check(tmp_path):
     r = ask(str(_need("fauxware_fla")), Hint(want=Want.IR, function="authenticate"))
     assert r.ok and r.readable and '"blocks"' in r.readable
-    out = "/tmp/argus020_skip.bin"
+    out = str(tmp_path / "argus020_skip.bin")
     r2 = ask(
         str(_need("fauxware")),
         Hint(want=Want.PATCH, patch_kind=PatchKind.SKIP_CHECK, function="authenticate", output=out),
@@ -99,6 +118,7 @@ def test_pe_cff_win64_unflatten_attempt():
     cff = recover_cff(cfg)
     assert cff.dispatcher is not None or len(cfg.blocks) >= 1
     if cff.case_map:
+        assert len(cff.case_map) >= 2, f"expected >=2 cases, got {len(cff.case_map)}"
         patcher = Patcher.from_path(str(path))
         res = apply_unflatten(patcher, cfg, cff)
         assert res.report.case_map

@@ -1,0 +1,22 @@
+# No autopilot in agent path (0.5+)
+
+The LLM is the **only planner**. Python must not auto-dispatch tools during `run_agent`.
+
+## Forbidden in agent loop
+
+- Auto `apply_plan` / `diagnose_failure` / `slice` before or instead of LLM steps
+- `NEXT_ACTION` imperative bootstrap blocks
+- Default needles (`error_text="License"`) when observation is missing
+- `argus_apply_plan` without explicit `steps=` from the model
+
+## Allowed
+
+- `bootstrap_evidence` — lightweight observations + `hints.suggested_tools`
+- `recovery_hints_from_trace` — text hints only, no `dispatch_tool`
+- Deterministic **backends** (`diagnose_failure`, `gate_scan`) when LLM calls the tool
+- `ARGUS_FAST_PATH=1` or `argus debug fast-path` for regression only
+- `_evaluate_tasks` truth model
+
+## Tool contract
+
+Tools return: `observations`, `evidence`, optional `hints`, `verify`. Never execute the next tool on behalf of the model.

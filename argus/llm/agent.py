@@ -10,25 +10,26 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from argus.llm.tools import ARGUS_TOOLS, dispatch_tool
 
-SYSTEM = """You are Argus Agent — a reverse-engineering assistant backed by the Argus binary toolkit.
+SYSTEM = """You are Argus Agent — a senior reverse-engineering assistant backed by the Argus binary toolkit.
 
-Investigation loop (like a human RE):
-1) argus_investigate at task start (or when stuck) — read observations[], hypotheses[], suggested_next_tool.
-2) Follow suggested_next_tool unless you have stronger evidence; never patch blind.
-3) Gate transform: argus_slice → argus_apply_plan from patch_plan only. Password/crackme: argus_ai / argus_solve.
-4) Success = tool verify.ok (bytes+behavior for gates). Your closing prose is ignored for task status.
+You are the planner. Tools execute atomic experiments and return observations + hints. Hints are suggestions — you decide what to run next.
+
+Cognitive model (examples, not a fixed pipeline):
+1) Verification chain: user input → format check → validator → state flags → UI sinks. Patching only one stage may leave others failing.
+2) On error dialog after patch: argus_diagnose_failure(error_text=<verbatim UI text from user/sandbox/find>) → corrective_patch → argus_apply_plan(steps=...).
+3) On crash (e.g. 0xC0000005): argus_diagnose_failure(crash_code=..., last_patch_addr=...) — do not stub jump tables with ret_imm.
+4) Before manual patches: argus_disasm to verify instruction boundaries and branch polarity.
+5) GUI apps need install-dir context (sibling DLLs, Packages/) — patch ONLY the work copy path.
 
 Rules:
-- MUST use tools; never invent results.
-- The user message lists TASKS (free-form). Address EVERY task. Bind EVERY tool call with for_task=<id>.
-- Prefer argus_find / argus_xrefs to ground hypotheses before argus_patch.
-- Never shorten resource filenames. Never stub main/entry.
-- If ETXTBSY: quit the app; do not claim done.
-- Missing file → stop. Patch ONLY the work copy path.
-- empty patch_plan → PIVOT (discover/modules/investigate/research), do not invent apply_plan steps=.
-- NEVER pass custom steps= unless copied verbatim from slice/investigate JSON.
-- Prior experience block is hints — not ground truth; still require tool verify.
-- Do NOT stop until runtime marks every TASK done. If approach fails: investigate/research, pivot module.
+- MUST use tools; never invent results or addresses.
+- Address EVERY task; bind EVERY tool call with for_task=<id>.
+- argus_apply_plan REQUIRES explicit steps= copied from slice, diagnose_failure, or decision_flow evidence.
+- argus_diagnose_failure REQUIRES error_text= or crash_code= — never guess needles like "License".
+- Start with observe tools (find, xrefs, disasm, investigate) when the task is open-ended (color, behavior, UI, gates).
+- Verification tiers: EXECUTION_VERIFIED (process launches, no crash) < BEHAVIOR_VERIFIED (check/input outcome actually changed). Launch oracle never supplies validation input — idle UI without reject_text is NOT proof the check accepts arbitrary input.
+- If task requires changed validation outcome: argus_diagnose_failure → apply ALL corrective_patch sites (or disasm/error sinks) — patching one branch while diagnose still lists missing sites means incomplete.
+- NEVER hardcode vendor addresses or one-off recipes — every addr/string from tool evidence on this binary.
 """
 
 
@@ -43,6 +44,7 @@ class AgentResult:
     task_statuses: List[Dict[str, Any]] = field(default_factory=list)
     patched_path: Optional[str] = None
     binary: Optional[str] = None
+    planner: str = "llm"
 
     def to_dict(self) -> dict:
         return {
@@ -54,6 +56,7 @@ class AgentResult:
             "task_statuses": self.task_statuses,
             "patched_path": self.patched_path,
             "binary": self.binary,
+            "planner": self.planner,
         }
 
 
@@ -86,11 +89,28 @@ def _absolute_max_steps() -> int:
         return 150
 
 
-def _hard_step_cap(max_steps: int) -> bool:
-    """Only enforce CLI max_steps when ARGUS_AGENT_HARD_MAX=1."""
+def _hard_step_cap(max_steps: int, model: Optional[str] = None) -> bool:
+    """Legacy weak-model cap — disabled when caller passed explicit max_steps > 0."""
     if max_steps <= 0:
         return False
-    return os.environ.get("ARGUS_AGENT_HARD_MAX", "").strip().lower() in ("1", "true", "yes")
+    # Explicit CLI --max-steps wins over env weak-cap (0.5 agent runs).
+    if max_steps > 10:
+        return False
+    if os.environ.get("ARGUS_AGENT_HARD_MAX", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    from argus.llm.autopilot import is_weak_model
+
+    return is_weak_model(model) and max_steps > 0
+
+
+def _resolve_max_steps(max_steps: int, model: Optional[str]) -> int:
+    """Apply weak-model default (10) when CLI max_steps=0."""
+    resolved = _effective_max_steps(max_steps)
+    if resolved > 0:
+        return resolved
+    from argus.llm.autopilot import default_max_steps_for_model
+
+    return default_max_steps_for_model(model)
 
 
 def _maybe_finalize_or_research(
@@ -157,12 +177,11 @@ def _build_user_content(
         parts.append("")
         parts.append(tasks_block)
     try:
-        from argus.llm.intent import routing_hint
+        from argus.llm.intent import format_task_signals
 
-        hint = routing_hint(user_prompt, binary=binary, discover=discover)
-        if hint:
-            parts.append("")
-            parts.append(hint)
+        sig_line = format_task_signals(user_prompt, binary=binary, discover=discover)
+        parts.append("")
+        parts.append(sig_line)
     except Exception:
         pass
     if memory_hints:
@@ -202,6 +221,120 @@ def _build_user_content(
     return "\n".join(parts)
 
 
+def _system_for_model(model: Optional[str]) -> str:
+    return SYSTEM
+
+
+def _bootstrap_prefix(
+    binary: Optional[str],
+    user_prompt: str,
+    *,
+    discover: Optional[dict] = None,
+    original_binary: Optional[str] = None,
+    tasks=None,
+) -> str:
+    if not binary:
+        return ""
+    try:
+        from argus.llm.autopilot import bootstrap_evidence
+
+        boot = bootstrap_evidence(
+            binary,
+            user_prompt,
+            discover=discover,
+            original_binary=original_binary,
+        )
+        return boot.get("brief") or ""
+    except Exception:
+        return ""
+
+
+def _recovery_hints_from_trace(
+    trace: List[Dict[str, Any]],
+    *,
+    binary: Optional[str],
+    user_prompt: str,
+    discover: Optional[dict],
+) -> Optional[str]:
+    """Hints only — LLM chooses tools; no auto-dispatch."""
+    if not binary:
+        return None
+    from argus.llm.autopilot import recovery_hints_from_trace
+
+    text = recovery_hints_from_trace(
+        trace,
+        binary=binary,
+        user_prompt=user_prompt,
+        discover=discover,
+    )
+    return text or None
+
+
+def _maybe_auto_pivot(
+    trace: List[Dict[str, Any]],
+    *,
+    binary: Optional[str],
+    user_prompt: str,
+    discover: Optional[dict],
+    verbose: bool,
+) -> Optional[str]:
+    return _recovery_hints_from_trace(
+        trace,
+        binary=binary,
+        user_prompt=user_prompt,
+        discover=discover,
+    )
+
+
+def _fast_path_enabled() -> bool:
+    return os.environ.get("ARGUS_FAST_PATH", "").strip().lower() in ("1", "true", "yes")
+
+
+def _try_gate_fast_path(
+    *,
+    binary: Optional[str],
+    user_prompt: str,
+    discover: Optional[dict],
+    original_binary: Optional[str],
+    tasks,
+    verbose: bool,
+) -> Optional[Tuple[List[Dict[str, Any]], str, bool]]:
+    """Run deterministic gate pipeline; return (trace, bootstrap_brief, task_done)."""
+    if not binary:
+        return None
+    import os
+
+    if not _fast_path_enabled():
+        return None
+    if os.environ.get("ARGUS_NO_FAST_PATH", "").strip().lower() in ("1", "true", "yes"):
+        return None
+    try:
+        from argus.llm.autopilot import run_gate_fast_path
+        from argus.llm.research import tasks_all_done
+
+        fp = run_gate_fast_path(
+            binary,
+            user_prompt,
+            discover=discover,
+            original_binary=original_binary,
+            tasks=tasks,
+            verbose=verbose,
+        )
+        trace = list(fp.get("trace") or [])
+        brief = str(fp.get("brief") or "")
+        if fp.get("done") and trace:
+            return trace, brief, True
+        if trace:
+            done = tasks_all_done(tasks, trace, binary=original_binary or binary)
+            return trace, brief, done
+        if brief:
+            return [], brief, False
+    except Exception as exc:
+        if verbose:
+            print(f"[fast-path] skipped: {exc}", flush=True)
+    return None
+
+
 def _trace_append(trace: List[Dict[str, Any]], name: str, args: Dict[str, Any], result: str) -> None:
     entry: Dict[str, Any] = {
         "tool": name,
@@ -213,6 +346,13 @@ def _trace_append(trace: List[Dict[str, Any]], name: str, args: Dict[str, Any], 
     except json.JSONDecodeError:
         pass
     trace.append(entry)
+    try:
+        from argus.llm.session import get_session
+
+        sess = get_session()
+        sess.tool_trace.append(entry)
+    except Exception:
+        pass
 
 
 def _effective_max_steps(max_steps: int) -> int:
@@ -383,7 +523,11 @@ def _run_agent_inner(
             sess = get_session()
             sess.original_binary = original_binary
             sess.work_binary = work
-            sess.install_dir = str(Path(original_binary).resolve().parent)
+            from argus.binary.launch_env import resolve_native_install_dir
+
+            sess.install_dir = str(
+                resolve_native_install_dir(original_binary, original=original_binary)
+            )
             binary = work
             if verbose:
                 print(f"[workspace] work={work} original={original_binary}", flush=True)
@@ -523,17 +667,54 @@ def _run_openai(
     client = OpenAICompatClient(cfg)
     model_name = cfg.model or "openai"
 
+    fp = _try_gate_fast_path(
+        binary=binary,
+        user_prompt=user_prompt,
+        discover=discover,
+        original_binary=original_binary,
+        tasks=tasks,
+        verbose=verbose,
+    )
+    trace: List[Dict[str, Any]] = []
+    bootstrap = ""
+    if fp:
+        trace, bootstrap, fp_done = fp
+        if fp_done:
+            res = finalize_agent(
+                tasks,
+                trace,
+                "gate fast path succeeded",
+                steps=0,
+                provider="openai",
+                raw_messages=[],
+                binary=original_binary or binary,
+                user_prompt=user_prompt,
+                discover=discover,
+                store_memory=store_memory,
+                planner="fast_path_legacy",
+            )
+            res.binary = original_binary or binary
+            return res
+    if not bootstrap:
+        bootstrap = _bootstrap_prefix(
+            binary,
+            user_prompt,
+            discover=discover,
+            original_binary=original_binary,
+            tasks=tasks,
+        )
     content = _build_user_content(
         user_prompt, binary, tasks_block, discover=discover, memory_hints=memory_hints
     )
+    if bootstrap:
+        content = bootstrap + "\n\n" + content
     if transcript is not None:
         transcript.initial_prompt(content)
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM},
+        {"role": "system", "content": _system_for_model(model_name)},
         {"role": "user", "content": content},
     ]
-    trace: List[Dict[str, Any]] = []
-    limit = _effective_max_steps(max_steps)
+    limit = _resolve_max_steps(max_steps, model_name)
     absolute = _absolute_max_steps()
     step = 0
 
@@ -555,7 +736,7 @@ def _run_openai(
             res.binary = original_binary or binary
             return res
 
-        if limit > 0 and step > limit and _hard_step_cap(limit):
+        if limit > 0 and step > limit and _hard_step_cap(limit, model_name):
             res = finalize_agent(
                 tasks,
                 trace,
@@ -650,6 +831,15 @@ def _run_openai(
                 "\nPatch loop — same addresses retried. PIVOT: argus_research / "
                 "different gate or argus_slice+apply_plan; do NOT stop."
             )
+        pivot_hint = _maybe_auto_pivot(
+            trace,
+            binary=binary,
+            user_prompt=user_prompt,
+            discover=discover,
+            verbose=verbose,
+        )
+        if pivot_hint:
+            hint += "\n" + pivot_hint
         if transcript is not None:
             transcript.user_message(step, hint, kind="open_tasks_hint")
         messages.append({"role": "user", "content": hint})
@@ -683,7 +873,7 @@ def _run_gemini(
         import sys
 
         print(
-            f"[warn] model {cfg.model} may hang; prefer gemini-3.6-flash",
+            f"[warn] model {cfg.model} may hang; prefer gemini-3.5-flash-lite",
             file=sys.stderr,
             flush=True,
         )
@@ -696,14 +886,52 @@ def _run_gemini(
 
     status_cb = _status_cb if (trace_ui is not None or transcript is not None) else None
     try:
+        fp = _try_gate_fast_path(
+            binary=binary,
+            user_prompt=user_prompt,
+            discover=discover,
+            original_binary=original_binary,
+            tasks=tasks,
+            verbose=verbose,
+        )
+        trace: List[Dict[str, Any]] = []
+        bootstrap = ""
+        if fp:
+            trace, bootstrap, fp_done = fp
+            if fp_done:
+                res = finalize_agent(
+                    tasks,
+                    trace,
+                    "gate fast path succeeded",
+                    steps=0,
+                    provider="gemini",
+                    raw_messages=[],
+                    binary=original_binary or binary,
+                    user_prompt=user_prompt,
+                    discover=discover,
+                    store_memory=store_memory,
+                    planner="fast_path_legacy",
+                )
+                res.binary = original_binary or binary
+                return res
+        if not bootstrap:
+            bootstrap = _bootstrap_prefix(
+                binary,
+                user_prompt,
+                discover=discover,
+                original_binary=original_binary,
+                tasks=tasks,
+            )
         text = _build_user_content(
             user_prompt, binary, tasks_block, discover=discover, memory_hints=memory_hints
         )
+        if bootstrap:
+            text = bootstrap + "\n\n" + text
         if transcript is not None:
             transcript.initial_prompt(text)
         contents: List[Dict[str, Any]] = [{"role": "user", "parts": [{"text": text}]}]
-        trace: List[Dict[str, Any]] = []
-        limit = _effective_max_steps(max_steps)
+        system_prompt = _system_for_model(cfg.model)
+        limit = _resolve_max_steps(max_steps, cfg.model)
         absolute = _absolute_max_steps()
         step = 0
 
@@ -725,7 +953,7 @@ def _run_gemini(
                 res.binary = original_binary or binary
                 return res
 
-            if limit > 0 and step > limit and _hard_step_cap(limit):
+            if limit > 0 and step > limit and _hard_step_cap(limit, cfg.model):
                 res = finalize_agent(
                     tasks,
                     trace,
@@ -751,7 +979,7 @@ def _run_gemini(
             try:
                 resp = client.generate(
                     contents,
-                    system=SYSTEM,
+                    system=system_prompt,
                     tools=ARGUS_TOOLS,
                     status_cb=status_cb,
                 )
@@ -826,6 +1054,15 @@ def _run_gemini(
                     "\nPatch loop — same addresses retried. PIVOT: argus_research / "
                     "different gate or argus_slice+apply_plan; do NOT stop."
                 )
+            pivot_hint = _maybe_auto_pivot(
+                trace,
+                binary=binary,
+                user_prompt=user_prompt,
+                discover=discover,
+                verbose=verbose,
+            )
+            if pivot_hint:
+                hint += "\n" + pivot_hint
             if transcript is not None:
                 transcript.user_message(step, hint, kind="open_tasks_hint")
             contents.append({"role": "user", "parts": [{"text": hint}]})

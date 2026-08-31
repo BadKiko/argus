@@ -27,6 +27,65 @@ def _plan_confidence(plan: List[Dict[str, Any]]) -> str:
     return str(p0.get("confidence") or "unknown")
 
 
+def rank_tool_suggestions(
+    *,
+    intent: TaskKind,
+    analyze_ok: bool,
+    find_ok: bool,
+    slice_data: Optional[Dict[str, Any]],
+    tools_tried: Optional[List[str]] = None,
+    verify_ok: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    """Ranked tool hints for the LLM — not executed automatically."""
+    tried_list = list(tools_tried or [])
+    tried = set(tried_list)
+    plan = list((slice_data or {}).get("patch_plan") or [])
+    conf = _plan_confidence(plan)
+    out: List[Dict[str, Any]] = []
+
+    def add(tool: str, reason: str, confidence: float) -> None:
+        if any(x.get("tool") == tool for x in out):
+            return
+        out.append({"tool": tool, "reason": reason, "confidence": round(confidence, 2)})
+
+    if intent == TaskKind.PASSWORD:
+        if "argus_ai" not in tried:
+            add("argus_ai", "password/crackme — NL solve", 0.75)
+        if "argus_solve" not in tried:
+            add("argus_solve", "symbolic/concolic path", 0.65)
+        if plan:
+            add("argus_apply_plan", "slice plan available — pass steps= from evidence", 0.55)
+        add("argus_research", "stuck — gather alternate strategy", 0.4)
+        return out
+
+    if "argus_slice" not in tried:
+        add("argus_slice", "map strings→xrefs→gates (multi=true)", 0.8)
+    if not plan and "argus_discover" not in tried:
+        add("argus_discover", "empty patch_plan — linked modules in install dir", 0.7)
+    if not plan:
+        add("argus_find", "try query= from user task wording", 0.65)
+
+    if conf in ("low", "none", "unknown") and plan:
+        add("argus_slice", f"weak confidence={conf} — widen modules=", 0.6)
+
+    if verify_ok is False:
+        add("argus_diagnose_failure", "verify failed — error_text from sandbox/user verbatim", 0.85)
+        if plan:
+            add("argus_apply_plan", "corrective steps from diagnose_failure", 0.6)
+
+    if plan and "argus_apply_plan" not in tried:
+        if any(s.get("kind") == "force_branch" for s in plan):
+            add("argus_decision_flow", "inspect gates before apply", 0.55)
+        add("argus_apply_plan", f"patch_plan ready ({len(plan)} steps, confidence={conf})", 0.7)
+
+    if find_ok and "argus_xrefs" not in tried:
+        add("argus_xrefs", "inspect xrefs on top string hit", 0.6)
+
+    add("argus_research", "gather more evidence or pivot module", 0.35)
+    out.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    return out
+
+
 def suggest_next_tool(
     *,
     intent: TaskKind,
@@ -36,39 +95,19 @@ def suggest_next_tool(
     tools_tried: Optional[List[str]] = None,
     verify_ok: Optional[bool] = None,
 ) -> Tuple[str, str]:
-    """Return (tool_name, reason)."""
-    tried = set(tools_tried or [])
-    plan = list((slice_data or {}).get("patch_plan") or [])
-    conf = _plan_confidence(plan)
-
-    if intent == TaskKind.PASSWORD:
-        if "argus_ai" not in tried and "argus_solve" not in tried:
-            return "argus_ai", "password/crackme — try NL solve or argus_solve"
-        if plan and "argus_apply_plan" not in tried:
-            return "argus_apply_plan", "slice plan available for authenticate stub"
-        return "argus_research", "password path stuck — research alternate strategy"
-
-    if not slice_data and "argus_slice" not in tried:
-        return "argus_slice", "no gate scan yet — map strings→xrefs→gates (multi=true)"
-
-    if not plan:
-        if "argus_discover" not in tried:
-            return "argus_discover", "empty patch_plan — find linked modules in install dir"
-        return "argus_slice", "re-slice with modules= from discover or different query"
-
-    if conf in ("low", "none", "unknown") and "argus_slice" in tried:
-        return "argus_slice", f"weak plan confidence={conf} — scan linked SO/DLL (multi, modules=)"
-
-    if verify_ok is False:
-        return "argus_research", "verify failed — rethink hypothesis before re-patch"
-
-    if plan and "argus_apply_plan" not in tried:
-        return "argus_apply_plan", f"patch_plan ready ({len(plan)} steps, confidence={conf})"
-
-    if "argus_xrefs" not in tried and find_ok:
-        return "argus_xrefs", "inspect xrefs on top string hit before freestyle patch"
-
-    return "argus_research", "gather more evidence or pivot module"
+    """Legacy: first ranked suggestion."""
+    ranked = rank_tool_suggestions(
+        intent=intent,
+        analyze_ok=analyze_ok,
+        find_ok=find_ok,
+        slice_data=slice_data,
+        tools_tried=tools_tried,
+        verify_ok=verify_ok,
+    )
+    if not ranked:
+        return "argus_investigate", "no suggestions — run investigate"
+    top = ranked[0]
+    return str(top.get("tool") or "argus_investigate"), str(top.get("reason") or "")
 
 
 def run_investigate(
@@ -170,29 +209,47 @@ def run_investigate(
             pass
 
     intent = classify_task_intent(task_text or query, binary=original_binary or binary, discover=discover)
-    next_tool, next_reason = suggest_next_tool(
+    ranked = rank_tool_suggestions(
         intent=intent,
         analyze_ok=True,
         find_ok=bool(hits),
         slice_data=slice_data,
     )
+    next_tool = ranked[0]["tool"] if ranked else "argus_investigate"
+    next_reason = ranked[0]["reason"] if ranked else "investigate"
 
     if intent == TaskKind.GATE_TRANSFORM and slice_data.get("patch_plan"):
-        hypotheses.append("Gate transform path: argus_apply_plan with slice patch_plan only (no invented steps)")
+        hypotheses.append(
+            "Hypothesis (unverified): slice patch_plan may apply via argus_apply_plan(steps=...) — verify gates first"
+        )
     if intent == TaskKind.PASSWORD:
-        hypotheses.append("Password task: argus_ai / argus_solve — not gate_transform apply_plan unless authenticate stub")
+        hypotheses.append("Hypothesis (unverified): password path — argus_ai / argus_solve before gate apply_plan")
+
+    from argus.llm.archetypes import match_archetype
+
+    arch = match_archetype(
+        task_text or query,
+        has_multiple_gates=len(slice_data.get("patch_plan") or []) > 1,
+    )
+    observations.append(f"Hypothesis (unverified): archetype={arch.name} — {arch.recommended_strategy}")
 
     summary = (
         f"investigate {img.fmt}/{img.arch} plan={len(slice_data.get('patch_plan') or [])} "
-        f"→ next={next_tool}"
+        f"ranked_tools={len(ranked)}"
     )
     return {
         "ok": True,
         "summary": summary,
+        "archetype": {
+            "name": arch.name,
+            "category": arch.category,
+            "recommended_strategy": arch.recommended_strategy,
+        },
         "observations": observations,
         "hypotheses": hypotheses,
         "suggested_next_tool": next_tool,
         "suggested_next_reason": next_reason,
+        "hints": {"suggested_tools": ranked},
         "intent": intent.value,
         "analyze": {
             "fmt": img.fmt,
@@ -218,7 +275,10 @@ def run_investigate(
         },
         "_slice_full": slice_data,
         "xref_previews": xref_previews,
-        "next_hint": f"Call {next_tool}: {next_reason}",
+        "next_hint": (
+            f"plan_steps={len(slice_data.get('patch_plan') or [])} "
+            f"ranked_tools={len(ranked)} top={next_tool}"
+        ),
         "evidence": {
             "observations": observations,
             "hypotheses": hypotheses,

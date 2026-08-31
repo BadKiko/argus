@@ -51,7 +51,10 @@ def prepare_work_binary(original: str) -> Tuple[str, str]:
     work_dir = work_dir_for(orig)
     work = (work_dir / orig.name).resolve()
     if not work.is_file() or orig.stat().st_mtime > work.stat().st_mtime:
-        shutil.copy2(orig, work)
+        from argus.binary.file_io import copy_binary_resilient, release_binary_lock
+
+        release_binary_lock(work)
+        copy_binary_resilient(orig, work, fallback_src=orig)
     try:
         work.chmod(orig.stat().st_mode)
     except OSError:
@@ -80,7 +83,43 @@ def is_same_file(a: Optional[str], b: Optional[str]) -> bool:
 
 def default_patch_output(work_binary: str) -> str:
     p = Path(work_binary)
-    return str(p.parent / f"{p.name}.patched")
+    stem = p.name
+    while stem.endswith(".patched"):
+        stem = stem[: -len(".patched")]
+    return str(p.parent / f"{stem}.patched")
+
+
+def resolve_work_binary_path(
+    val: Optional[str],
+    *,
+    work_binary: str,
+    original_binary: str,
+) -> Optional[str]:
+    """Map model-supplied paths to existing workspace files (handles missing .argus-work paths)."""
+    if not val:
+        return val
+    p = Path(val)
+    work = Path(work_binary)
+    orig = Path(original_binary)
+    if p.is_file():
+        return str(p.resolve())
+    # Only remap workspace-ish paths — not arbitrary missing absolute paths.
+    if p.is_absolute() and p.name not in (work.name, orig.name) and not p.name.endswith(".patched"):
+        return str(val)
+    candidates = [
+        work,
+        work.parent / p.name,
+        Path(default_patch_output(str(work))),
+        work.parent / f"{work.name}.patched",
+    ]
+    if p.name.endswith(".patched"):
+        candidates.insert(0, work.parent / p.name)
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+    if p.name in (work.name, orig.name) and work.is_file():
+        return str(work.resolve())
+    return str(val)
 
 
 def rewrite_tool_paths(arguments: Dict[str, Any], *, work_binary: str, original_binary: str) -> Dict[str, Any]:
@@ -101,9 +140,14 @@ def rewrite_tool_paths(arguments: Dict[str, Any], *, work_binary: str, original_
         try:
             if p.samefile(orig) or p.samefile(work):
                 args[key] = str(work)
+                continue
         except OSError:
             if p == orig or p == work:
                 args[key] = str(work)
+                continue
+        resolved = resolve_work_binary_path(str(val), work_binary=str(work), original_binary=str(orig))
+        if resolved:
+            args[key] = resolved
 
     out = args.get("output")
     if out:
@@ -128,3 +172,39 @@ def assert_not_original_target(path: Optional[str], original_binary: str) -> Opt
             f"({original_binary} is read-only for the agent)"
         )
     return None
+
+
+def assert_not_install_write(path: Optional[str], original_binary: str) -> Optional[str]:
+    """Refuse writes into the install directory (except workspace subdirs)."""
+    if not path or not original_binary:
+        return None
+    p = _resolve(path)
+    orig = _resolve(original_binary)
+    if p is None or orig is None:
+        return None
+    if is_same_file(str(p), original_binary):
+        return assert_not_original_target(str(p), original_binary)
+    install = orig.parent
+    try:
+        if p.is_relative_to(install):
+            name = p.name.lower()
+            if name.startswith(".argus") or name.startswith(".sandbox_"):
+                return None
+            if p.parent.name == ".argus-work":
+                return None
+            return (
+                f"refused: cannot write into install directory ({install}) — "
+                "use workspace cache or .argus-work"
+            )
+    except (AttributeError, ValueError):
+        if str(p).startswith(str(install) + os.sep):
+            return f"refused: cannot write into install directory ({install})"
+    return None
+
+
+def exec_workspace_dir(work_binary: str) -> Path:
+    """Writable directory for argus_exec scripts (never install dir)."""
+    work = Path(work_binary).resolve()
+    d = work.parent / ".argus-exec"
+    d.mkdir(parents=True, exist_ok=True)
+    return d

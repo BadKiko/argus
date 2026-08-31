@@ -33,6 +33,10 @@ class SessionContext:
     research_round: int = 0
     last_investigate: Dict[str, Any] = field(default_factory=dict)
     tools_tried: List[str] = field(default_factory=list)
+    verified_plans: List[Dict[str, Any]] = field(default_factory=list)
+    tool_trace: List[Dict[str, Any]] = field(default_factory=list)
+    auto_pivot_done: bool = False
+    gate_fast_path_done: bool = False
 
 
 _current: Optional[SessionContext] = None
@@ -51,6 +55,17 @@ def reset_session(*, strict_plan: Optional[bool] = None) -> SessionContext:
         strict_plan=strict_plan if strict_plan is not None else strict_plan_enabled()
     )
     return _current
+
+
+def add_verified_plan_steps(steps: List[Dict[str, Any]]) -> None:
+    sess = get_session()
+    for s in steps:
+        if isinstance(s, dict) and s not in sess.verified_plans:
+            sess.verified_plans.append(s)
+
+
+def get_verified_plan_steps() -> List[Dict[str, Any]]:
+    return list(get_session().verified_plans)
 
 
 def _norm_modules(modules: Optional[List[str]]) -> Tuple[str, ...]:
@@ -94,9 +109,9 @@ def cached_gate_scan(
     sess = get_session()
     if not sess.last_gate_scan_full or sess.last_slice_binary != binary:
         return None
-    if sess.last_gate_scan_query != query:
+    if query is not None and sess.last_gate_scan_query != query:
         return None
-    if sess.last_gate_scan_modules != _norm_modules(modules):
+    if modules is not None and sess.last_gate_scan_modules != _norm_modules(modules):
         return None
     if sess.last_gate_scan_multi != multi:
         return None
@@ -124,13 +139,22 @@ def record_investigate(binary: str, payload: Dict[str, Any]) -> None:
 
 
 def investigation_hint() -> str:
-    """Short hint from last investigate for agent loop."""
+    """Factual hint from last investigate — not an imperative command."""
     sess = get_session()
     inv = sess.last_investigate
     if not inv:
         return ""
-    tool = inv.get("suggested_next_tool") or ""
-    reason = inv.get("suggested_next_reason") or ""
-    if not tool:
-        return ""
-    return f"Investigation suggests: {tool} — {reason}"
+    slice_d = inv.get("slice") or {}
+    plan_len = len(slice_d.get("patch_plan") or [])
+    hits = (inv.get("find") or {}).get("hits") or []
+    top = hits[0].get("preview") if hits else None
+    parts = [f"last_investigate: patch_plan_steps={plan_len}"]
+    if top:
+        parts.append(f"top_hit={str(top)[:40]!r}")
+    ranked = (inv.get("hints") or {}).get("suggested_tools") or []
+    if ranked:
+        parts.append(
+            "suggested_tools: "
+            + ", ".join(f"{x.get('tool')}({x.get('confidence')})" for x in ranked[:3])
+        )
+    return "Investigation context: " + "; ".join(parts)

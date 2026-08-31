@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from argus.find_slice import build_patch_plan, gate_scan
 from argus.llm.tasks import UserTask, finalize_agent
@@ -69,12 +70,13 @@ def test_gate_scan_fauxware_smoke():
     assert isinstance(d["patch_plan"], list)
 
 
-def test_apply_plan_fauxware_rejects_invented_steps(tmp_path):
+def test_apply_plan_fauxware_rejects_invented_steps(tmp_path, monkeypatch):
     """Fauxware is a password crackme — invented authenticate stub is not slice-sourced."""
     import shutil
 
     from argus.binary import load_binary
 
+    monkeypatch.setenv("ARGUS_STRICT_PLAN", "1")
     src = tmp_path / "fauxware"
     shutil.copy(SAMPLES / "fauxware", src)
     img = load_binary(str(src))
@@ -83,32 +85,34 @@ def test_apply_plan_fauxware_rejects_invented_steps(tmp_path):
         {"kind": "ret_imm", "addr": hex(auth), "value": 1, "why": "test stub"},
     ]
     out = tmp_path / "out.patched"
-    d = apply_plan(str(src), output=str(out), steps=steps)
+    d = apply_plan(str(src), output=str(out), steps=steps, auto_slice=True)
     assert d.get("plan_source") == "rejected_model"
     assert d.get("ok") is False
     assert d["verify"]["ok"] is False
 
 
-def test_dispatch_apply_plan_and_finalize(tmp_path):
+def test_dispatch_apply_plan_and_finalize(tmp_path, monkeypatch):
     """Finalize accepts unlock only with slice plan evidence + plan_source=slice."""
     import shutil
 
     from argus.binary import load_binary
 
+    monkeypatch.setenv("ARGUS_STRICT_PLAN", "1")
     src = tmp_path / "fauxware"
     shutil.copy(SAMPLES / "fauxware", src)
     img = load_binary(str(src))
     auth = img.symbols["authenticate"].addr
     step = {"kind": "ret_imm", "addr": hex(auth), "value": 1}
-    raw = dispatch_tool(
-        "argus_apply_plan",
-        {
-            "binary": str(src),
-            "output": str(tmp_path / "u.patched"),
-            "steps": [step],
-            "for_task": 1,
-        },
-    )
+    with patch("argus.patch.sandbox.test_patch_in_sandbox", return_value={"safe": True}):
+        raw = dispatch_tool(
+            "argus_apply_plan",
+            {
+                "binary": str(src),
+                "output": str(tmp_path / "u.patched"),
+                "steps": [step],
+                "for_task": 1,
+            },
+        )
     data = json.loads(raw)
     assert data.get("ok") is False
     assert data.get("plan_source") == "rejected_model" or (
@@ -141,6 +145,19 @@ def test_dispatch_apply_plan_and_finalize(tmp_path):
                     "detail": "bytes+behavior ok",
                     "patch_bytes": {"ok": True},
                     "patch_behavior": {"ok": True, "ran": True},
+                },
+            },
+        },
+        {
+            "tool": "argus_gui_oracle",
+            "args": {"for_task": 1},
+            "result": {
+                "ok": True,
+                "for_task": 1,
+                "verify": {
+                    "ok": True,
+                    "kind": "gui_launch_oracle",
+                    "detail": "GUI launch ok from install cwd",
                 },
             },
         },

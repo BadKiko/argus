@@ -10,14 +10,13 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 # Reuse the same generic needle classes as license slice (imported lazily to avoid cycles)
 _PATH_RX = re.compile(
     r"(?P<p>"
-    r"(?:[A-Za-z]:[\\/]|/)?"
-    r"(?:[\w.-]+[\\/])*"
-    r"[\w.-]+\.(?:exe|dll|so|bin|elf|dylib)?[\w.-]*"
-    r"|(?:/[\w.-]+)+(?:/[\w.-]+)*"
+    r"(?:[A-Za-z]:[\\/]|/)(?:[\w.-]+[\\/])*[\w.-]+"
+    r"|(?:\.{1,2}[\\/])(?:[\w.-]+[\\/])*[\w.-]+"
+    r"|(?:[\w.-]+[\\/])*[\w.-]+\.(?:exe|dll|so|bin|elf|dylib)[\w.-]*"
     r")"
 )
 
-_DIR_RX = re.compile(r"(?P<d>/(?:[\w.-]+/)*[\w.-]+)")
+_DIR_RX = re.compile(r"(?P<d>(?:[A-Za-z]:[\\/]|/)(?:[\w.-]+[\\/])*[\w.-]+)")
 
 _SYSTEM_DLL = {
     "kernel32.dll",

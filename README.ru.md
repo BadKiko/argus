@@ -14,7 +14,7 @@
 |--------|----------------|
 | Понять stripped ELF/PE | Строки, xref’ы, pseudo-C, CFG |
 | Аккуратно сменить поведение | `patch_plan` → apply → verify (байты + smoke) |
-| Решить crackme / пароль | Symbolic / concolic (`argus ai` / agent) |
+| Решить crackme / пароль | Symbolic / concolic (`argus agent` / `solve`) |
 | Снять OLLVM-подобное CFF | Unflatten + опциональный патч + verify |
 | Учиться на прошлых кейсах | Общая case memory (подсказки, не истина) |
 
@@ -33,12 +33,20 @@
                     → задача «done» только по evidence тулов
 ```
 
-Главные правила:
+Главные принципы:
 
-1. **Форматы — адаптеры** — сегодня ELF/PE; агент думает задачами, а не «рецептами под один вендор».
-2. **Текст агента не закрывает задачу** — статус из результатов тулов (`verify.ok`, план из slice и т.д.).
-3. **Пайплайн gate transform** — `argus_slice` → `patch_plan` → `argus_apply_plan` → verify. Одиночные freestyle-патчи такие задачи не завершают.
-4. **Memory — это RAG** — похожие кейсы лишь hints; локально всё равно нужно verify.
+1. **Равноправие платформ (Linux и Windows — граждане первого класса)**:
+   - **Движок Linux**: ELF64/32, DWARF, секции раскрутки стека `.eh_frame`, GNU ABI, PLT/GOT, загрузка соседних библиотек через `LD_LIBRARY_PATH`.
+   - **Движок Windows**: PE32/PE32+, каталоги функций исключений `.pdata` x64 ($O(1)$ поиск функций), Win64 ABI, импорты/экспорты IAT/EAT, поиск DLL через Windows `PATH`, нативная поведенческая smoke-проверка `.exe`.
+2. **Высокопроизводительная архитектура**:
+   - Нулевое оверхед-выделение памяти `SparseMemory` (срезы секций вместо гигантских Python-словарей на 30–50 млн элементов — мгновенно масштабируется на бинарники 50–100+ МБ).
+   - Векторизованный NumPy-поиск xref'ов и rodata, отрабатывающий за миллисекунды на тяжелых десктопных приложениях.
+   - Ускоренный проход Capstone с точечной фильтрацией инструкций.
+3. **Форматы — адаптеры** — сегодня ELF/PE; агент думает задачами, а не «рецептами под одну ОС».
+4. **Текст агента не закрывает задачу** — статус определяется только результатами тулов (`verify.ok`, проверенный план патчей и т.д.).
+5. **Пайплайн gate transform** — `argus_slice` → `patch_plan` → `argus_apply_plan` → verify. Одиночные freestyle-патчи такие задачи не завершают.
+6. **Динамический синтез инструментов и расширяемость** — если встроенных инструментов Argus недостаточно или агент зашел в тупик, он может вызвать `argus_exec` для написания собственных Python-скриптов (с использованием `argus`, `pefile`, `capstone`, `z3`) или выполнения shell-команд (`pip install`, `curl`) для динамической загрузки или создания недостающих утилит.
+7. **Memory — это RAG** — похожие кейсы лишь подсказки (hints); локально всё равно требуется верификация.
 
 Подробнее: [docs/ARGUS_VISION.md](docs/ARGUS_VISION.md).
 
@@ -60,39 +68,31 @@ pip install -e ".[dev,concrete]"
 
 ## Быстрый старт
 
-### 1. Естественный язык (без облачной LLM)
-
-Локальный / regex-роутер — удобно для smoke:
-
-```bash
-argus ai "дай пароль для админа" samples/fauxware_fla
-```
-
-### 2. Настоящий агент (рекомендуется)
+### 1. Полноценный LLM-агент (рекомендуется)
 
 **Gemini (AI Studio)** — ключ: [aistudio.google.com/apikey](https://aistudio.google.com/apikey):
 
 ```bash
 export GEMINI_API_KEY="AIza..."
 export ARGUS_LLM_PROVIDER=gemini
-export ARGUS_GEMINI_MODEL=gemini-2.0-flash
+export ARGUS_GEMINI_MODEL=gemini-3.5-flash-lite
 
-argus agent --provider gemini "дай пароль для админа" samples/fauxware_fla -v
+argus agent --provider gemini "найди и проанализируй логику проверки" samples/fauxware_fla -v
 ```
 
-**OpenAI-compatible** (OpenAI, OpenRouter, Gemini OpenAI shim):
+**OpenAI-совместимый** (OpenAI, OpenRouter, Gemini OpenAI shim):
 
 ```bash
 export ARGUS_OPENAI_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/"
 export ARGUS_OPENAI_API_KEY="AIza..."
-export ARGUS_OPENAI_MODEL="gemini-2.0-flash"
+export ARGUS_OPENAI_MODEL="gemini-3.5-flash-lite"
 
-argus agent --provider openai "дай пароль" samples/fauxware -v
+argus agent --provider openai "найди и проанализируй логику проверки" samples/fauxware -v
 ```
 
 Агент при необходимости находит связанные модули, патчит только **work copy** и закрывает задачи по evidence тулов.
 
-### 3. Классический CLI
+### 2. Классический CLI
 
 ```bash
 argus analyze samples/fauxware

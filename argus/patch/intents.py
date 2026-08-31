@@ -13,6 +13,24 @@ def force_branch(path: str, addr: int, output: str, taken: bool = True) -> Tuple
     fo = patcher._file_offset(addr)
     if fo is None:
         return False, {"notes": ["bad addr"]}
+
+    # Strict instruction verification via Capstone
+    try:
+        import capstone as cs
+        md64 = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64)
+        raw = patcher.data[fo : fo + 16]
+        insns = list(md64.disasm(raw, addr))
+        is_jcc = bool(insns and insns[0].mnemonic.startswith("j") and insns[0].mnemonic not in ("jmp", "jecxz", "jrcxz"))
+        if not is_jcc:
+            md32 = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_32)
+            insns32 = list(md32.disasm(raw, addr))
+            is_jcc = bool(insns32 and insns32[0].mnemonic.startswith("j") and insns32[0].mnemonic not in ("jmp", "jecxz", "jrcxz"))
+        if not is_jcc:
+            found_mnem = insns[0].mnemonic if insns else "non-code"
+            return False, {"notes": [f"addr {hex(addr)} is not a conditional branch (found {found_mnem})"]}
+    except Exception:
+        pass
+
     op = patcher.data[fo]
     ok = False
     if taken and 0x70 <= op <= 0x7F:
@@ -48,6 +66,47 @@ def ret_imm(path: str, fn_addr: int, value: int, output: str) -> Tuple[bool, Dic
         patches=[{"addr": hex(fn_addr), "note": f"ret_imm {value}"}],
         proven=False,
         notes=["ret_imm stub"],
+    )
+    return ok, cert.to_dict()
+
+
+def force_flag(path: str, addr: int, output: str) -> Tuple[bool, Dict[str, Any]]:
+    """Replace setcc on a memory byte with mov byte ptr [same], 1 (same length when disp8)."""
+    import capstone as cs
+
+    patcher = Patcher.from_path(path)
+    fo = patcher._file_offset(addr)
+    if fo is None:
+        return False, {"notes": ["bad addr"]}
+
+    mode = cs.CS_MODE_64
+    md = cs.Cs(cs.CS_ARCH_X86, mode)
+    raw = patcher.data[fo : fo + 16]
+    insns = list(md.disasm(raw, addr))
+    if not insns:
+        md32 = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_32)
+        insns = list(md32.disasm(raw, addr))
+    if not insns or not insns[0].mnemonic.startswith("set"):
+        return False, {"notes": [f"addr {hex(addr)} is not setcc"]}
+
+    insn = insns[0]
+    if "ptr" not in insn.op_str:
+        return False, {"notes": ["setcc does not target memory"]}
+
+    # setcc mem is 4 bytes for [reg+disp8]; mov imm8 same size: c6 /r disp8 01
+    if insn.size != 4:
+        return False, {"notes": [f"unsupported setcc size {insn.size}"]}
+
+    # Re-use ModRM from setcc (0f 94/95 xx) → mov (c6 xx 01)
+    modrm = raw[2]
+    payload = bytes([0xC6, modrm, raw[3], 0x01])
+    ok = patcher.patch_bytes(addr, payload, note="force_flag mov byte,1")
+    if ok:
+        patcher.save(output)
+    cert = PatchCertificate(
+        patches=[{"addr": hex(addr), "note": "force_flag"}],
+        proven=False,
+        notes=["setcc→mov byte 1"],
     )
     return ok, cert.to_dict()
 

@@ -107,52 +107,26 @@ def _build_task_explanation(
     lines: List[str] = []
     failures = _tool_failures_for_task(tool_trace, task.id)
     if failures:
-        lines.append("Не сработало: " + "; ".join(failures[:4]))
+        lines.append("tool_failures: " + "; ".join(failures[:4]))
 
-    from argus.llm.intent import TaskKind, classify_task_intent
-
-    intent = classify_task_intent(task.text, binary=binary)
-    bypass = _is_bypass_password_task(task.text)
+    if detail:
+        lines.append(f"verify_evidence: {detail}")
 
     if had_logic_patch and patched_path:
         bv = _behavior_verify_patched(patched_path)
         if bv and bv.get("ran"):
+            lines.append(
+                f"behavior_smoke: ok={bv.get('ok')} method={bv.get('method')} "
+                f"detail={str(bv.get('detail') or '')[:100]}"
+            )
             preview = (bv.get("stdout_preview") or "")[:100]
-            if bv.get("ok"):
-                if status != "done":
-                    lines.append(
-                        "Патч технически работает (smoke-test ok), но runtime не засчитал задачу — "
-                        "нужен verify в trace или argus_apply_plan."
-                    )
-            else:
-                lines.append(f"Патч не прошёл проверку поведения: {bv.get('detail')}")
-                if preview:
-                    lines.append(f"Вывод: {preview!r}")
-                if bypass and "go away" in str(bv.get("detail", "")).lower():
-                    lines.append(
-                        "ret_imm на authenticate часто недостаточен — в main jmp мимо success. "
-                        "Попробуйте: argus_slice → argus_apply_plan (force_branch на gate после authenticate)."
-                    )
-    elif had_logic_patch and bypass:
-        lines.append(
-            "Freestyle-патч без behavior verify. Для «любой пароль»: "
-            "argus_slice → argus_apply_plan по patch_plan."
-        )
-
-    if intent == TaskKind.PASSWORD and bypass and not had_logic_patch:
-        lines.append(
-            "Задача — принять любой пароль (bypass), не узнать пароль. "
-            "argus_slice → argus_apply_plan; не argus_solve/argus_ai."
-        )
+            if preview:
+                lines.append(f"stdout_preview: {preview!r}")
 
     if status == "incomplete" and not lines:
-        lines.append(
-            "Агент остановился до полного verify. Запустите patched binary вручную или дайте feedback для повтора."
-        )
-    if detail and detail not in " ".join(lines):
-        lines.insert(0, f"Evidence: {detail}")
+        lines.append("incomplete: no verify evidence in tool trace yet")
 
-    return "\n".join(lines[:5])
+    return "\n".join(lines[:6])
 
 
 def split_user_tasks(prompt: str) -> List[UserTask]:
@@ -221,60 +195,77 @@ def open_tasks_hint(tasks: List[UserTask], tool_trace: List[Dict[str, Any]]) -> 
     statuses = _evaluate_tasks(tasks, tool_trace, binary=binary)
     open_ids = [s.task.id for s in statuses if s.status != "done"]
     if not open_ids:
-        return "All TASKS have tool evidence marked done. Stop and let runtime finalize."
-
-    hints: List[str] = [
-        f"Still open: {', '.join(str(i) for i in open_ids)} — "
-        "bind for_task; keep calling tools until done (argus_research if stuck)."
-    ]
-
-    slice_len = _max_slice_plan_len(tool_trace)
-    tools_seen = [e.get("tool") for e in tool_trace]
-    if slice_len == 0 and "argus_slice" in tools_seen:
+        task_text = tasks[0].text if tasks else ""
         try:
-            from argus.llm.session import get_session
+            from argus.llm.verification_hints import verification_gap_hint
 
-            sess = get_session()
-            if sess.install_dir:
-                hints.append(
-                    f"patch_plan empty — argus_discover(root={sess.install_dir!r}) "
-                    f"then argus_slice with modules=[linked SO/DLL from install dir]. "
-                    "Do NOT scan .cache/argus/workspaces."
+            vgap = verification_gap_hint(tool_trace, task_text)
+            if vgap:
+                return (
+                    "TASK STATUS: runtime would finalize, but verification_gap remains:\n"
+                    + vgap
+                    + "\nDo NOT stop — apply remaining corrective_patch / cover error sinks."
                 )
         except Exception:
             pass
-    if slice_len == 0 and "argus_patch" in tools_seen and "argus_slice" not in tools_seen:
-        hints.append(
-            "PIVOT: run argus_slice before freestyle patch; or argus_research for strategy."
-        )
-    elif slice_len == 0 and "argus_patch" in tools_seen:
-        hints.append(
-            "patch_plan was empty — try argus_slice with query=, argus_discover, or argus_research."
-        )
-    if _fauxware_loop_pattern(tool_trace):
-        hints.append(
-            "Password crackme pattern — prefer argus_slice→apply_plan or argus_ai; "
-            "not invented patch steps."
-        )
-    if "argus_research" not in tools_seen and len(tool_trace) >= 4:
-        hints.append("Consider argus_research(query=<problem>) before repeating failed tools.")
-    if "argus_investigate" not in tools_seen:
-        hints.append("Start or refresh: argus_investigate(query=<task keywords>) for observations + next tool.")
-    try:
-        from argus.llm.session import investigation_hint
+        return "All TASKS have tool evidence marked done. Stop and let runtime finalize."
 
+    lines: List[str] = [
+        f"TASK STATUS: open={open_ids}",
+    ]
+    for s in statuses:
+        if s.status != "done":
+            lines.append(f"  task {s.task.id}: {s.status} — {s.detail}")
+
+    last_failure = None
+    for entry in reversed(tool_trace[-5:]):
+        res = _parse_result(entry)
+        if res.get("ok") is False:
+            last_failure = entry
+            break
+    if last_failure:
+        f_res = _parse_result(last_failure)
+        lines.append(
+            f"last_failure: tool={last_failure.get('tool')} "
+            f"summary={str(f_res.get('summary') or '')[:120]}"
+        )
+        verify = f_res.get("verify") or {}
+        if verify:
+            lines.append(
+                f"verify: kind={verify.get('kind')} ok={verify.get('ok')} "
+                f"detail={str(verify.get('detail') or '')[:80]}"
+            )
+
+    slice_len = _max_slice_plan_len(tool_trace)
+    lines.append(f"evidence: max_slice_plan_len={slice_len} tool_calls={len(tool_trace)}")
+
+    try:
+        from argus.llm.autopilot import recovery_hints_from_trace
+        from argus.llm.session import investigation_hint
+        from argus.llm.verification_hints import verification_gap_hint
+
+        task_text = tasks[0].text if tasks else ""
+        rec = recovery_hints_from_trace(
+            tool_trace, binary=binary or "", user_prompt=task_text, discover=None
+        )
+        if rec:
+            lines.append(rec)
         inv = investigation_hint()
         if inv:
-            hints.append(inv)
+            lines.append(inv)
+        vgap = verification_gap_hint(tool_trace, task_text)
+        if vgap:
+            lines.append(vgap)
     except Exception:
         pass
-    return "\n".join(hints)
+
+    return "\n".join(lines)
 
 
 def _max_slice_plan_len(tool_trace: List[Dict[str, Any]]) -> int:
     best = 0
     for entry in tool_trace:
-        if entry.get("tool") != "argus_slice":
+        if entry.get("tool") not in ("argus_slice", "argus_investigate"):
             continue
         payload = _parse_result(entry)
         plan = payload.get("patch_plan")
@@ -291,7 +282,7 @@ def _fauxware_loop_pattern(tool_trace: List[Dict[str, Any]]) -> bool:
     saw_logic_patch = False
     for entry in tool_trace:
         tool = entry.get("tool")
-        if tool == "argus_slice":
+        if tool in ("argus_slice", "argus_investigate"):
             payload = _parse_result(entry)
             plan = payload.get("patch_plan") or (payload.get("evidence") or {}).get("patch_plan") or []
             if isinstance(plan, list) and len(plan) == 0:
@@ -308,10 +299,10 @@ def _slice_plan_in_trace(
     *,
     task_id: Optional[int] = None,
 ) -> Tuple[bool, int]:
-    """True if trace contains argus_slice with non-empty patch_plan (optionally same for_task)."""
+    """True if trace contains argus_slice or argus_investigate with non-empty patch_plan (optionally same for_task)."""
     best = 0
     for entry in tool_trace:
-        if entry.get("tool") != "argus_slice":
+        if entry.get("tool") not in ("argus_slice", "argus_investigate"):
             continue
         if task_id is not None:
             payload = _parse_result(entry)
@@ -321,35 +312,62 @@ def _slice_plan_in_trace(
         payload = _parse_result(entry)
         plan = payload.get("patch_plan")
         if plan is None:
-            plan = (payload.get("evidence") or {}).get("patch_plan") or []
+            plan = (payload.get("evidence") or {}).get("patch_plan")
+        if not plan and isinstance(payload.get("slice"), dict):
+            plan = payload["slice"].get("patch_plan")
         if isinstance(plan, list):
             best = max(best, len(plan))
     return best > 0, best
 
 
+def _bytes_ok_from_apply(payload: Dict[str, Any]) -> bool:
+    verify = payload.get("verify") or {}
+    pb = verify.get("patch_bytes") or {}
+    if pb.get("ok") is True:
+        return True
+    applied = payload.get("applied") or []
+    return bool(applied) and all(a.get("ok") for a in applied)
+
+
 def _patch_verify_ok(payload: Dict[str, Any], *, gate_task: bool = False) -> bool:
     verify = payload.get("verify") or {}
-    if verify.get("ok") is not True:
-        return False
-    kind = verify.get("kind") or ""
-    behavior = verify.get("patch_behavior") or {}
-    if kind == "patch_composite":
-        if behavior.get("ran") and behavior.get("ok") is not True:
+    if verify.get("ok") is True:
+        kind = verify.get("kind") or ""
+        behavior = verify.get("patch_behavior") or {}
+        disasm = verify.get("patch_disasm") or {}
+        if disasm.get("ok") is True:
+            return True
+        if kind == "patch_composite":
+            if behavior.get("needs_oracle") and (verify.get("patch_bytes") or {}).get("ok"):
+                return True
+            if behavior.get("ran") and behavior.get("ok") is not True:
+                if not behavior.get("needs_oracle"):
+                    return False
+            if gate_task and (behavior.get("skipped") or not behavior.get("ran")):
+                plan_source = payload.get("plan_source") or (payload.get("evidence") or {}).get("plan_source")
+                if plan_source == "diagnose":
+                    return bool((verify.get("patch_bytes") or {}).get("ok"))
+                return False
+            bytes_v = verify.get("patch_bytes") or {}
+            return bytes_v.get("ok") is True
+        if gate_task and kind == "patch_bytes":
+            plan_source = payload.get("plan_source") or (payload.get("evidence") or {}).get("plan_source")
+            if plan_source == "diagnose":
+                return True
             return False
-        if gate_task and (behavior.get("skipped") or not behavior.get("ran")):
-            return False
-        bytes_v = verify.get("patch_bytes") or {}
-        return bytes_v.get("ok") is True
-    if gate_task and kind == "patch_bytes":
-        return False
-    return kind in ("patch_bytes", "patch_composite", "")
+        return kind in ("patch_bytes", "patch_composite", "")
+    if gate_task and _bytes_ok_from_apply(payload):
+        ps = payload.get("plan_source") or (payload.get("evidence") or {}).get("plan_source")
+        if ps == "diagnose":
+            return True
+    return False
 
 
 def _plan_sourced_apply(payload: Dict[str, Any]) -> bool:
     ps = payload.get("plan_source")
     if ps is None:
         ps = (payload.get("evidence") or {}).get("plan_source")
-    if ps == "slice":
+    if ps in ("slice", "investigate", "diagnose"):
         return True
     if ps == "rejected_model":
         return False
@@ -435,6 +453,17 @@ def _is_logic_patch(entry: Dict[str, Any]) -> bool:
 
 def _is_apply_plan(entry: Dict[str, Any]) -> bool:
     return entry.get("tool") == "argus_apply_plan"
+
+
+def _is_gui_oracle(entry: Dict[str, Any]) -> bool:
+    return entry.get("tool") == "argus_gui_oracle"
+
+
+def _gui_oracle_ok(payload: Dict[str, Any]) -> bool:
+    verify = payload.get("verify") or {}
+    if verify.get("ok") is True:
+        return True
+    return payload.get("ok") is True and verify.get("ok") is not False
 
 
 def _is_replace_patch(entry: Dict[str, Any]) -> bool:
@@ -550,6 +579,8 @@ def _evaluate_tasks(
         had_password_ok = False
         password_detail = ""
         last_ok_detail = ""
+        had_gui_oracle_ok = False
+        gui_oracle_detail = ""
 
         for entry, payload in evs:
             ok = payload.get("ok")
@@ -570,25 +601,35 @@ def _evaluate_tasks(
 
             if _is_apply_plan(entry):
                 vok = _patch_verify_ok(payload, gate_task=gate_task)
-                vkind = (payload.get("verify") or {}).get("kind") or ""
                 plan_ok = _plan_sourced_apply(payload)
                 had_slice_plan, _ = _slice_plan_in_trace(tool_trace, task_id=t.id)
-                if vok and plan_ok and had_slice_plan:
+                had_diagnose_plan = plan_ok and (payload.get("plan_source") == "diagnose")
+                if vok and plan_ok and (had_slice_plan or had_diagnose_plan):
                     had_patch_ok = True
                     verify = payload.get("verify") or {}
                     last_ok_detail = verify.get("detail") or "patch verified"
-                elif not vok or not plan_ok or not had_slice_plan:
+                elif _bytes_ok_from_apply(payload) and had_diagnose_plan:
+                    had_patch_ok = True
+                    last_ok_detail = "diagnose patch bytes ok"
+                elif not vok or not plan_ok or not (had_slice_plan or had_diagnose_plan):
                     had_patch_fail = True
-                    if not had_slice_plan or not plan_ok:
-                        fail_detail = fail_detail or "need slice patch_plan before apply_plan"
+                    if not (had_slice_plan or had_diagnose_plan) or not plan_ok:
+                        fail_detail = fail_detail or "need slice or diagnose patch_plan before apply_plan"
                     elif not vok:
                         verify = payload.get("verify") or {}
                         fail_detail = verify.get("detail") or "patch verify failed"
                     else:
-                        fail_detail = fail_detail or "apply_plan without slice-sourced plan"
+                        fail_detail = fail_detail or "apply_plan without verified plan"
                 else:
                     had_patch_fail = True
                     fail_detail = "apply_plan without patch_bytes ok"
+                continue
+
+            if _is_gui_oracle(entry) and _gui_oracle_ok(payload):
+                had_gui_oracle_ok = True
+                verify = payload.get("verify") or {}
+                gui_oracle_detail = str(verify.get("detail") or payload.get("summary") or "gui launch oracle ok")
+                last_ok_detail = gui_oracle_detail
                 continue
 
             if _is_replace_patch(entry):
@@ -622,9 +663,14 @@ def _evaluate_tasks(
                 had_weak_only = False
             last_ok_detail = summary or entry.get("tool") or "ok"
 
-        from argus.llm.intent import TaskKind, classify_task_intent
+        from argus.llm.intent import TaskKind, classify_task_intent, is_bypass_license_task
 
         task_intent = classify_task_intent(t.text, binary=binary)
+        if gate_task:
+            bypass_task = is_bypass_license_task(t.text)
+        else:
+            bypass_task = _is_bypass_password_task(t.text)
+
         if task_intent == TaskKind.PASSWORD and gate_task:
             if had_patch_ok:
                 had_patch_ok = False
@@ -633,7 +679,6 @@ def _evaluate_tasks(
             elif had_attempted_logic and not had_verified_replace:
                 fail_detail = fail_detail or "password binary — patch authenticate or use argus_ai password"
 
-        bypass_task = _is_bypass_password_task(t.text)
         patched_path = _patched_path_from_evs(evs) or _patched_path_from_trace(tool_trace)
 
         if had_password_ok and task_intent == TaskKind.PASSWORD and not bypass_task:
@@ -649,7 +694,7 @@ def _evaluate_tasks(
             )
             continue
 
-        if had_attempted_logic and bypass_task and patched_path:
+        if had_attempted_logic and bypass_task and patched_path and not gate_task:
             bv = _behavior_verify_patched(patched_path)
             if bv and bv.get("ok"):
                 preview = (bv.get("stdout_preview") or "").strip().replace("\n", " ")[:80]
@@ -660,6 +705,49 @@ def _evaluate_tasks(
                     )
                 )
                 continue
+
+        if gate_task and had_patch_ok:
+            from argus.llm.verification_hints import gate_outcome_verified
+
+            outcome_ok, outcome_detail = gate_outcome_verified(tool_trace, t.text)
+            if had_gui_oracle_ok and outcome_ok:
+                out.append(
+                    _emit_task_status(
+                        t,
+                        "done",
+                        gui_oracle_detail or last_ok_detail or "patch + gui launch oracle ok",
+                        evs,
+                        tool_trace,
+                        binary=binary,
+                    )
+                )
+                continue
+            if had_gui_oracle_ok and not outcome_ok:
+                out.append(
+                    _emit_task_status(
+                        t,
+                        "incomplete",
+                        (outcome_detail or "launch oracle ok but outcome-change unproven")
+                        + " — apply remaining diagnose corrective_patch / cover error sinks",
+                        evs,
+                        tool_trace,
+                        binary=binary,
+                    )
+                )
+                continue
+            out.append(
+                _emit_task_status(
+                    t,
+                    "incomplete",
+                    last_ok_detail
+                    + " — need argus_gui_oracle(reject_texts=...) on patched binary",
+                    evs,
+                    tool_trace,
+                    binary=binary,
+                    had_logic_patch=had_attempted_logic,
+                )
+            )
+            continue
 
         if had_patch_ok:
             out.append(
@@ -673,6 +761,8 @@ def _evaluate_tasks(
             detail = fail_detail or last_ok_detail or "need argus_apply_plan verify.ok"
             if had_attempted_logic and not had_patch_ok:
                 detail = detail or "freestyle logic patch — not patch_plan; use argus_slice + apply_plan"
+            if not had_gui_oracle_ok:
+                detail = (detail + "; then argus_gui_oracle on patched exe").strip("; ")
             out.append(
                 _emit_task_status(
                     t,
@@ -759,6 +849,7 @@ def finalize_agent(
     user_prompt: str = "",
     discover: Optional[dict] = None,
     store_memory: bool = True,
+    planner: str = "llm",
 ) -> "AgentResult":
     from argus.llm.agent import AgentResult
 
@@ -834,6 +925,7 @@ def finalize_agent(
                 task_status_list,
                 discover=discover,
                 steps=steps,
+                planner=planner,
             )
         except Exception:
             pass
@@ -848,4 +940,5 @@ def finalize_agent(
         task_statuses=task_status_list,
         patched_path=patched,
         binary=binary,
+        planner=planner,
     )

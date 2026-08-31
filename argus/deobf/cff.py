@@ -41,15 +41,18 @@ class CFFReport:
         }
 
 
-# dword ptr [rbp - 0x2c]
+# dword ptr [rbp - 0x2c] / PE x64 [rsp+0x28]
 _MEM_SLOT = re.compile(
-    r"(?:byte|word|dword|qword)\s+ptr\s+\[(rbp|ebp)\s*([+-])\s*(0x[0-9a-f]+)\]",
+    r"(?:byte|word|dword|qword)\s+ptr\s+\[(rbp|ebp|rsp|r\d+b)\s*([+-])\s*(0x[0-9a-f]+|\d+)\]",
     re.I,
 )
 
 
 def _slot_key(m: re.Match) -> str:
-    return f"[{m.group(1).lower()}{m.group(2)}{m.group(3).lower()}]"
+    off = m.group(3)
+    if not off.lower().startswith("0x"):
+        off = hex(int(off))
+    return f"[{m.group(1).lower()}{m.group(2)}{off.lower()}]"
 
 
 def _slot_in_text(slot: str, text: str) -> bool:
@@ -72,16 +75,23 @@ def find_dispatcher(cfg: CFG) -> Optional[int]:
     for addr in cfg.blocks:
         if addr not in cfg.graph:
             continue
+        blk = cfg.blocks.get(addr)
+        has_indirect = False
+        if blk:
+            for ins in blk.instructions:
+                if ins.mnemonic == "jmp" and "[" in ins.op_str and "ptr" in ins.op_str:
+                    has_indirect = True
+                    break
         indeg = cfg.graph.in_degree(addr)
         outdeg = cfg.graph.out_degree(addr)
         back = 0
         for pred in cfg.graph.predecessors(addr):
-            blk = cfg.blocks.get(pred)
-            if blk and blk.instructions:
-                last = blk.instructions[-1]
+            pblk = cfg.blocks.get(pred)
+            if pblk and pblk.instructions:
+                last = pblk.instructions[-1]
                 if last.is_jmp and addr in last.targets:
                     back += 1
-        score = back * 10 + indeg * outdeg
+        score = back * 10 + indeg * outdeg + (15 if has_indirect else 0)
         if back >= 1 and outdeg >= 2 and score > best_score:
             best, best_score = addr, score
     if best is not None:

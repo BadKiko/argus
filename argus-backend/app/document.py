@@ -6,28 +6,37 @@ from app.models import CaseReport
 
 
 def case_document(report: CaseReport) -> str:
-    tools = " → ".join(s.tool for s in report.strategies[:12])
+    seq = report.features.get("tool_sequence")
+    if isinstance(seq, list) and seq:
+        tools = " → ".join(str(t).replace("argus_", "") for t in seq[:12])
+    else:
+        tools = " → ".join(s.tool.replace("argus_", "") for s in report.strategies[:12])
     failures = ", ".join(report.failure_modes[:5]) or "none"
     kinds = ",".join(report.task_kinds) or "general"
     pivoted = report.features.get("pivoted", False)
+    planner = str(report.features.get("planner") or "llm")
     return (
         f"format={report.format} arch={report.arch} protection={report.protection} "
         f"task={report.task[:200]} kinds={kinds}\n"
-        f"strategy: {tools}\n"
+        f"investigation_path: {tools}\n"
         f"outcome={report.outcome.value} verification={report.verification_level.value} "
-        f"pivoted={pivoted}\n"
+        f"pivoted={pivoted} planner={planner}\n"
         f"failure: {failures}"
     )
 
 
 def hint_summary(report: CaseReport) -> str:
-    tools = "+".join(s.tool.replace("argus_", "") for s in report.strategies[:4])
+    seq = report.features.get("tool_sequence")
+    if isinstance(seq, list) and seq:
+        tools = "→".join(str(t).replace("argus_", "") for t in seq[:6])
+    else:
+        tools = "+".join(s.tool.replace("argus_", "") for s in report.strategies[:4])
     extra = ""
     if report.features.get("pivoted"):
-        extra = ", pivoted to linked module"
-    if report.modules_patched:
-        extra += f", patched {report.modules_patched[0]}"
-    return f"{tools}{extra}"
+        extra = ", pivoted"
+    if report.features.get("planner") == "fast_path_legacy":
+        extra += ", fast_path_legacy"
+    return f"path:{tools}{extra}"
 
 
 def query_document(

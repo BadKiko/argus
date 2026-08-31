@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 class VerificationLevel(str, Enum):
     UNKNOWN = "UNKNOWN"
     USER_REPORTED = "USER_REPORTED"
+    BYTES_VERIFIED = "BYTES_VERIFIED"
     EXECUTION_VERIFIED = "EXECUTION_VERIFIED"
     BEHAVIOR_VERIFIED = "BEHAVIOR_VERIFIED"
     FORMALLY_VERIFIED = "FORMALLY_VERIFIED"
@@ -22,6 +23,7 @@ class PatchCertificate:
     proven: bool = False
     level: VerificationLevel = VerificationLevel.UNKNOWN
     notes: List[str] = field(default_factory=list)
+    planner: str = "llm"
 
     def to_dict(self) -> dict:
         return {
@@ -30,6 +32,7 @@ class PatchCertificate:
             "patches": self.patches,
             "behavioral": self.behavioral,
             "notes": self.notes,
+            "planner": self.planner,
         }
 
 
@@ -43,9 +46,9 @@ def level_from_verify(verify: Optional[Dict[str, Any]]) -> VerificationLevel:
             return VerificationLevel.BEHAVIOR_VERIFIED
         bytes_v = verify.get("patch_bytes") or {}
         if bytes_v.get("ok") is True:
-            return VerificationLevel.EXECUTION_VERIFIED
+            return VerificationLevel.BYTES_VERIFIED
     if kind == "patch_bytes":
-        return VerificationLevel.EXECUTION_VERIFIED
+        return VerificationLevel.BYTES_VERIFIED
     if kind in ("behavioral", "concrete", "patch_behavior"):
         return VerificationLevel.BEHAVIOR_VERIFIED
     return VerificationLevel.UNKNOWN
@@ -54,9 +57,11 @@ def level_from_verify(verify: Optional[Dict[str, Any]]) -> VerificationLevel:
 def certify_apply_plan(
     applied: List[Dict[str, Any]],
     verify: Optional[Dict[str, Any]],
+    *,
+    planner: str = "llm",
 ) -> PatchCertificate:
     level = level_from_verify(verify)
-    proven = level in (VerificationLevel.BEHAVIOR_VERIFIED, VerificationLevel.FORMALLY_VERIFIED)
+    proven = level == VerificationLevel.FORMALLY_VERIFIED
     notes: List[str] = []
     if verify:
         notes.append(str(verify.get("detail") or verify.get("kind") or "verify"))
@@ -69,6 +74,7 @@ def certify_apply_plan(
         proven=proven,
         level=level,
         notes=notes,
+        planner=planner,
     )
 
 

@@ -122,7 +122,10 @@ VMP_SAMPLES = [
 
 @pytest.mark.parametrize("rel", VMP_SAMPLES, ids=lambda t: t[-1])
 def test_tier_c_protector_load(rel):
-    img = load_binary(_need(*rel))
+    try:
+        img = load_binary(_need(*rel))
+    except (PermissionError, OSError) as e:
+        pytest.skip(f"Binary access blocked by OS/Defender: {e}")
     assert img.entry != 0
     assert len(img.sections) >= 1
 
@@ -139,7 +142,10 @@ def test_tier_c_protector_load(rel):
     ids=lambda t: t[-1],
 )
 def test_tier_c_protector_entry_cfg_smoke(rel):
-    img = load_binary(_need(*rel))
+    try:
+        img = load_binary(_need(*rel))
+    except (PermissionError, OSError) as e:
+        pytest.skip(f"Binary access blocked by OS/Defender: {e}")
     cfg = build_cfg(img, entry=img.entry, max_blocks=250)
     # Protectors often start in stub code — we only require a non-empty CFG attempt
     assert cfg.entry == img.entry

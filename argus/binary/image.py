@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -25,6 +25,72 @@ class Symbol:
     is_import: bool = False
 
 
+class SparseMemory:
+    """Zero-allocation sparse memory view over sections with an overlay for writes."""
+
+    def __init__(self, sections: List[Section], overrides: Optional[Dict[int, int]] = None):
+        self.sections = sections
+        self.overrides: Dict[int, int] = overrides if overrides is not None else {}
+
+    def get(self, addr: int, default: int = 0) -> int:
+        if addr in self.overrides:
+            return self.overrides[addr]
+        for s in self.sections:
+            if s.data and s.addr <= addr < s.addr + len(s.data):
+                return s.data[addr - s.addr]
+        return default
+
+    def __getitem__(self, addr: int) -> int:
+        if addr in self.overrides:
+            return self.overrides[addr]
+        for s in self.sections:
+            if s.data and s.addr <= addr < s.addr + len(s.data):
+                return s.data[addr - s.addr]
+        raise KeyError(addr)
+
+    def __setitem__(self, addr: int, val: int) -> None:
+        self.overrides[addr] = val & 0xFF
+
+    def __contains__(self, addr: int) -> bool:
+        if addr in self.overrides:
+            return True
+        for s in self.sections:
+            if s.data and s.addr <= addr < s.addr + len(s.data):
+                return True
+        return False
+
+    def setdefault(self, addr: int, default: int = 0) -> int:
+        if addr in self:
+            return self[addr]
+        self.overrides[addr] = default & 0xFF
+        return default & 0xFF
+
+    def items(self):
+        for s in self.sections:
+            if not s.data:
+                continue
+            for i, b in enumerate(s.data):
+                addr = s.addr + i
+                yield addr, self.overrides.get(addr, b)
+        for addr, b in self.overrides.items():
+            if not any(s.data and s.addr <= addr < s.addr + len(s.data) for s in self.sections):
+                yield addr, b
+
+    def keys(self):
+        for addr, _ in self.items():
+            yield addr
+
+    def values(self):
+        for _, b in self.items():
+            yield b
+
+    def copy(self) -> SparseMemory:
+        return SparseMemory(list(self.sections), dict(self.overrides))
+
+    def __len__(self) -> int:
+        return sum(len(s.data) for s in self.sections if s.data) + len(self.overrides)
+
+
 @dataclass
 class BinaryImage:
     path: str
@@ -35,13 +101,32 @@ class BinaryImage:
     sections: List[Section] = field(default_factory=list)
     symbols: Dict[str, Symbol] = field(default_factory=dict)
     imports: Dict[int, str] = field(default_factory=dict)  # plt/iat addr -> name
-    # Flat sparse memory image for analysis / emulation
-    memory: Dict[int, int] = field(default_factory=dict)
+    # Sparse memory image for analysis / emulation
+    memory: Any = field(default_factory=dict)
 
     def read_bytes(self, addr: int, size: int) -> bytes:
-        out = bytearray()
+        if size <= 0:
+            return b""
+        sec = self.section_at(addr)
+        if sec and sec.data and sec.addr <= addr and addr + size <= sec.addr + len(sec.data):
+            offset = addr - sec.addr
+            chunk = bytearray(sec.data[offset : offset + size])
+            overrides = getattr(self.memory, "overrides", None)
+            if overrides:
+                for i in range(size):
+                    a = addr + i
+                    if a in overrides:
+                        chunk[i] = overrides[a]
+            elif isinstance(self.memory, dict) and self.memory:
+                for i in range(size):
+                    a = addr + i
+                    if a in self.memory:
+                        chunk[i] = self.memory[a]
+            return bytes(chunk)
+
+        out = bytearray(size)
         for i in range(size):
-            out.append(self.memory.get(addr + i, 0))
+            out[i] = self.memory.get(addr + i, 0)
         return bytes(out)
 
     def write_bytes(self, addr: int, data: bytes) -> None:
@@ -50,7 +135,7 @@ class BinaryImage:
 
     def section_at(self, addr: int) -> Optional[Section]:
         for s in self.sections:
-            if s.addr <= addr < s.addr + max(s.size, len(s.data)):
+            if s.addr <= addr < s.addr + max(s.size, len(s.data) if s.data else 0):
                 return s
         return None
 

@@ -52,4 +52,5 @@ def test_dispatch_investigate_tool():
     data = json.loads(raw)
     assert data.get("ok") is True
     assert data.get("observations")
-    assert "argus_" in (data.get("suggested_next_tool") or "")
+    ranked = (data.get("hints") or {}).get("suggested_tools") or []
+    assert ranked and ranked[0].get("tool", "").startswith("argus_")

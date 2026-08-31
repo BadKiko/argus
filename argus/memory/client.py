@@ -135,6 +135,7 @@ def store_session_case(
     user_feedback: str = "",
     user_confirmed: bool = False,
     runtime_launch: Optional[Dict[str, Any]] = None,
+    planner: str = "llm",
 ) -> Optional[str]:
     if not memory_enabled():
         return None
@@ -152,6 +153,7 @@ def store_session_case(
         user_feedback=user_feedback,
         user_confirmed=user_confirmed,
         runtime_launch=runtime_launch,
+        planner=planner,
     )
     if not report:
         return None

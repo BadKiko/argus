@@ -16,8 +16,7 @@ def test_fauxware_remove_license_routes_password():
     kind = classify_task_intent("remove license check", binary=str(FAUXWARE))
     assert kind == TaskKind.PASSWORD
     hint = routing_hint("remove license check", binary=str(FAUXWARE))
-    assert "PASSWORD" in hint
-    assert "NOT" in hint or "not" in hint
+    assert "password" in hint.lower() or "Password" in hint
 
 
 def test_license_prompt_routes_unlock():

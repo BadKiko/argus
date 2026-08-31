@@ -1,6 +1,6 @@
 ---
 name: Argus 0.2.0 Mega
-overview: Релиз 0.2.0 делает Argus LLM-native солвером (hint→answer/lift/patch) с сильным concolic+OLLVM ELF/PE корпусом ~90% и отдельным VMP-слоем до частичной девиртуализации на tiny samples — без обещания полного Themida/ultrasec unpack.
+overview: "Superseded by PLAN_0.4.0.md for agent hardening; kept for historical Wave A–F notes."
 todos:
   - id: a-ask2
     content: "Wave A: Ask 2.0 — ir/skip_check, richer lift, agent JSON schema"

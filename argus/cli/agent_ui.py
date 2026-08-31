@@ -176,17 +176,30 @@ def run_patched_binary(console: Console, path: str, *, stdin: bytes = b"\n\n") -
         console.print(f"[red]нет файла:[/red] {path}")
         return LaunchResult(ok=False, detail=f"missing file: {path}", error_kind="missing_file")
 
-    cwd, env = _launch_env(p)
-    ld_path = env.get("LD_LIBRARY_PATH", "")
-    console.print(
-        Rule(
-            f"[cyan]Запуск patched binary[/cyan]  [dim]cwd={cwd}[/dim]",
-            style="dim",
-        )
-    )
+    from argus.binary.launch_env import stage_native_executable
+
+    staged = None
     try:
+        orig = None
+        try:
+            from argus.llm.session import get_session
+
+            orig = get_session().original_binary or None
+        except Exception:
+            orig = None
+        staged = stage_native_executable(p, original=orig)
+        launch_p = staged.path
+        cwd, env = _launch_env(launch_p)
+        cwd = staged.cwd or cwd
+        ld_path = env.get("LD_LIBRARY_PATH", "")
+        console.print(
+            Rule(
+                f"[cyan]Запуск patched binary[/cyan]  [dim]cwd={cwd} exe={launch_p}[/dim]",
+                style="dim",
+            )
+        )
         proc = subprocess.Popen(
-            [str(p.resolve())],
+            [str(launch_p.resolve())],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -248,10 +261,16 @@ def run_patched_binary(console: Console, path: str, *, stdin: bytes = b"\n\n") -
         return LaunchResult(
             ok=False,
             detail=str(e),
-            cwd=cwd,
-            ld_library_path=ld_path,
+            cwd=cwd if "cwd" in locals() else "",
+            ld_library_path=ld_path if "ld_path" in locals() else "",
             error_kind="os_error",
         )
+    finally:
+        if staged is not None and staged.ephemeral:
+            try:
+                staged.path.unlink()
+            except OSError:
+                pass
 
 
 def build_retry_prompt(original: str, feedback: str, res: AgentResult) -> str:

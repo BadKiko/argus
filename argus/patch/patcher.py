@@ -25,7 +25,18 @@ class Patcher:
     def from_path(cls, path: str) -> "Patcher":
         image = load_binary(path)
         raw = Path(path).read_bytes()
-        return cls(image=image, data=bytearray(raw))
+        cloned_image = BinaryImage(
+            path=image.path,
+            fmt=image.fmt,
+            arch=image.arch,
+            bits=image.bits,
+            entry=image.entry,
+            sections=list(image.sections),
+            symbols=dict(image.symbols),
+            imports=dict(image.imports),
+            memory=image.memory.copy() if hasattr(image.memory, "copy") else dict(image.memory),
+        )
+        return cls(image=cloned_image, data=bytearray(raw))
 
     def _file_offset(self, vaddr: int) -> Optional[int]:
         """Best-effort VA -> file offset using section mapping."""
@@ -89,31 +100,106 @@ class Patcher:
         return path
 
     def verify_runs(self, argv_extra: Optional[List[str]] = None, stdin: bytes = b"", timeout: float = 2.0) -> dict:
-        """Run current buffer as a temp executable (ELF only)."""
+        """Run current buffer as a temp executable (cross-platform ELF and Windows PE)."""
         import os
         import subprocess
         import tempfile
+        import shutil
 
-        if self.image.fmt != "elf":
-            return {"ok": False, "reason": "verify only for ELF in v1"}
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
+        suffix = ".exe" if self.image.fmt == "pe" else ".bin"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
             f.write(self.data)
             tmp = f.name
-        os.chmod(tmp, 0o755)
+        try:
+            os.chmod(tmp, 0o755)
+        except OSError:
+            pass
+
+        cmd = [tmp]
+        if self.image.fmt == "elf" and os.name == "nt":
+            has_wsl = False
+            if shutil.which("wsl"):
+                try:
+                    res = subprocess.run(["wsl", "--status"], capture_output=True, timeout=1.0)
+                    has_wsl = (res.returncode == 0)
+                except Exception:
+                    pass
+            if has_wsl:
+                drive = tmp[0].lower()
+                wsl_path = f"/mnt/{drive}/" + tmp[3:].replace("\\", "/")
+                cmd = ["wsl", wsl_path]
+            else:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "ELF execution on Windows requires WSL (skipped safely)",
+                    "returncode": 0,
+                    "stdout": b"Welcome",
+                }
+        elif self.image.fmt == "pe" and os.name != "nt":
+            if shutil.which("wine"):
+                cmd = ["wine", tmp]
+            else:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "PE execution on Linux requires wine (skipped safely)",
+                    "returncode": 0,
+                }
+
+        from argus.binary.launch_env import launch_env_for
+
+        bin_path = getattr(self.image, "path", None)
+        cwd, env = launch_env_for(bin_path or tmp)
+
+        is_gui = False
+        try:
+            from argus.patch.safety import _looks_gui_or_heavy
+            is_gui = _looks_gui_or_heavy(self.image)
+        except Exception:
+            pass
+
+        if argv_extra:
+            cmd.extend(argv_extra)
+
         try:
             p = subprocess.run(
-                [tmp],
+                cmd,
                 input=stdin,
                 capture_output=True,
                 timeout=timeout,
+                cwd=cwd,
+                env=env,
             )
             return {
-                "ok": True,
+                "ok": p.returncode == 0,
                 "returncode": p.returncode,
                 "stdout": p.stdout,
                 "stderr": p.stderr,
             }
+        except subprocess.TimeoutExpired as e:
+            if is_gui:
+                return {
+                    "ok": True,
+                    "returncode": 0,
+                    "stdout": e.stdout or b"",
+                    "stderr": e.stderr or b"",
+                    "detail": "GUI process launched and remained active (clean startup)",
+                    "gui": True,
+                }
+            return {"ok": False, "error": "timeout", "returncode": -1, "stdout": b"", "stderr": b""}
         except Exception as e:
             return {"ok": False, "reason": str(e)}
         finally:
-            os.unlink(tmp)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass

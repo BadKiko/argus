@@ -48,3 +48,18 @@ Structured case memory: successes **and** failures, strategy scoring, RAG hints 
 ## Final principle
 
 > Don't teach the AI every binary. Teach it how to investigate, remember, choose the next experiment, transform, and prove correctness.
+
+## Argus 0.5 — LLM plans, tools observe
+
+From **0.5.0**, the agent path follows:
+
+```
+User task → LLM (only planner) → atomic tools → evidence + hints → LLM next step → verify → memory
+```
+
+- **Fast-path / autopilot** is **opt-in** (`ARGUS_FAST_PATH=1` or `argus debug fast-path`) — not the default agent.
+- Tools return **observations + ranked hints**; hints are never auto-executed.
+- `apply_plan` and `diagnose_failure` require explicit parameters from the model (no silent auto-slice, no `"License"` fallback).
+- Case memory stores **tool sequences** and `planner=llm` vs `fast_path_legacy`.
+
+See [PLAN_0.5.0.md](../PLAN_0.5.0.md) and `.cursor/rules/no-autopilot.mdc`.

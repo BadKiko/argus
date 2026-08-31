@@ -22,6 +22,12 @@ _GUI_IMPORT_MARKERS = (
     "wayland",
     "glfw",
     "sdl_",
+    "user32",
+    "gdi32",
+    "createwindow",
+    "messagebox",
+    "showwindow",
+    "defwindowproc",
 )
 
 
@@ -154,10 +160,11 @@ def assess_patched_binary(
             "patched_prologue": p_pro[:8].hex(),
         }
 
+    can_run_native = (orig.fmt == "elf" and os.name != "nt") or (orig.fmt == "pe" and os.name == "nt")
     do_smoke = allow_smoke if allow_smoke is not None else (
-        orig.fmt == "elf" and not _looks_gui_or_heavy(orig)
+        can_run_native and not _looks_gui_or_heavy(orig)
     )
-    if do_smoke and orig.fmt == "elf":
+    if do_smoke and can_run_native:
         o_run = _smoke_run(original_path, smoke_timeout)
         p_run = _smoke_run(patched_path, smoke_timeout)
         # Original timed out (still alive) but patched exited fast with no output → broken
@@ -207,31 +214,41 @@ def assess_patched_binary(
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    if hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
         try:
-            proc.kill()
-        except Exception:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
             pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 def _smoke_run(path: str, timeout: float) -> Dict[str, Any]:
-    """Short CLI smoke in a new session; kill the whole group on timeout."""
+    from argus.binary.launch_env import launch_env_for
+
+    cwd, launch_env = launch_env_for(path)
     env = {
-        **os.environ,
+        **launch_env,
         "QT_QPA_PLATFORM": "offscreen",
         "DISPLAY": "",
         "WAYLAND_DISPLAY": "",
     }
+    kwargs: Dict[str, Any] = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "env": env,
+        "cwd": cwd,
+    }
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
     try:
         proc = subprocess.Popen(
             [path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-            env=env,
+            **kwargs,
         )
     except Exception as e:
         return {"ok": False, "timeout": False, "reason": str(e), "returncode": None}

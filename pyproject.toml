@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "argus-re"
-version = "0.2.0"
+version = "0.5.0"
 description = "Hybrid binary analysis: CFG, conservative GNN prune, SMT solve, patch"
 readme = "README.md"
 license = { text = "MIT" }

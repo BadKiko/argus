@@ -106,8 +106,11 @@ def test_launch_env_uses_install_dir(monkeypatch):
 
     get_session().install_dir = "/usr/lib/beyondcompare"
     cwd, env = _launch_env(Path("/tmp/ws/BCompare.patched"))
-    assert cwd == "/usr/lib/beyondcompare"
-    assert "/usr/lib/beyondcompare" in env["LD_LIBRARY_PATH"]
+    # cwd follows the exe; install dir is extra loader search path
+    assert Path(cwd) == Path("/tmp/ws").resolve()
+    assert "/usr/lib/beyondcompare" in env["LD_LIBRARY_PATH"] or str(
+        Path("/usr/lib/beyondcompare")
+    ) in env.get("PATH", "")
 
 
 def test_launch_failed_detects_loader_error():

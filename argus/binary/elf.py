@@ -7,7 +7,7 @@ from elftools.elf.elffile import ELFFile
 from elftools.elf.relocation import RelocationSection
 from elftools.elf.sections import SymbolTableSection
 
-from .image import BinaryImage, Section, Symbol
+from .image import BinaryImage, Section, Symbol, SparseMemory
 
 
 def load_elf(path: Path) -> BinaryImage:
@@ -21,7 +21,6 @@ def load_elf(path: Path) -> BinaryImage:
         entry = int(elf.header["e_entry"])
 
         sections: list[Section] = []
-        memory: Dict[int, int] = {}
 
         for sec in elf.iter_sections():
             name = sec.name or ""
@@ -45,18 +44,20 @@ def load_elf(path: Path) -> BinaryImage:
                     readable=readable,
                 )
             )
-            if data and addr:
-                for i, b in enumerate(data):
-                    memory[addr + i] = b
 
         # Also map PT_LOAD segments (covers gaps / BSS zeroing intent)
+        load_overrides: Dict[int, int] = {}
         for seg in elf.iter_segments():
             if seg["p_type"] != "PT_LOAD":
                 continue
             vaddr = int(seg["p_vaddr"])
             data = seg.data()
-            for i, b in enumerate(data):
-                memory.setdefault(vaddr + i, b)
+            # If segment has bytes not covered by sections, keep them in overrides
+            if not any(s.addr <= vaddr < s.addr + len(s.data) for s in sections if s.data):
+                for i, b in enumerate(data):
+                    load_overrides[vaddr + i] = b
+
+        memory = SparseMemory(sections, load_overrides)
 
         symbols: Dict[str, Symbol] = {}
         for sec in elf.iter_sections():

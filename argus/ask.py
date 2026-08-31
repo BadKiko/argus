@@ -586,7 +586,7 @@ def ask(path: str, hint: Hint) -> AskResult:
             res = solve_after_deobf(path, function=hint.function, find=hint.find)
             notes.append("solve_after_deobf")
         else:
-            res = solve_binary(path, find=hint.find)
+            res = solve_binary(path, find=hint.find, note=hint.note or "")
             notes.append("solve_direct")
         ok = bool(res.success and res.stdin)
         answer = None

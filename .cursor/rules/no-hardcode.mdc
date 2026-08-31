@@ -1,0 +1,32 @@
+---
+description: Never hardcode vendor-specific binary patches or product recipes in Argus agent/tooling code.
+alwaysApply: true
+---
+
+# No hardcoding rule
+
+Argus must work on **unseen binaries**. Agent and tooling code must NOT contain:
+
+- Fixed VAs, function names, or patch plans for a specific product (Sublime, Beyond Compare, etc.)
+- Hardcoded error strings used as default diagnose needles (except generic structural tokens like `BEGIN LICENSE` in format parsers)
+- "If product X then patch Y" branches in Python
+
+## Required pattern
+
+1. **Observe** — sandbox, GUI oracle, or user provides exact runtime text / crash code.
+2. **Diagnose** — `argus_diagnose_failure(error_text=...)` back-traces from that text.
+3. **Plan** — `corrective_patch` from decision flow (force_branch, force_flag, nop_call, function-local ret_imm).
+4. **Verify** — `argus_gui_oracle(reject_texts=[observed fragment])` or behavior verify with positive oracle.
+
+## Allowed
+
+- Generic algorithms (CFG gates, setcc→force_flag, error-path nop_call, install-dir staging)
+- User-supplied strings passed through tool arguments
+- Test fixtures under `samples/` or synthetic binaries
+
+## Forbidden in new code
+
+- Default needle lists like `["Enter License", "Sublime Merge", ...]` in autopilot
+- Product-specific functions (`close_sublime_merge` as primary API — aliases OK for compat)
+
+When adding agent hints, teach the **workflow**, not a recipe.

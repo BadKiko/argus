@@ -240,20 +240,27 @@ def build_func_index(img: BinaryImage, *, max_starts: int = 80_000) -> FuncIndex
     text_ranges: List[Tuple[int, int]] = []
     for base, data in _exec_sections(img):
         text_ranges.append((base, base + len(data)))
-        _scan_prologues(data, base, starts)
-        if len(data) <= 2_000_000 and len(starts) < max_starts // 2:
-            _scan_call_targets(img, data, base, starts)
+
+    # Seed known symbols first (includes Windows .pdata runtime functions & ELF symbols)
+    sym_by_addr = {}
+    for s in img.symbols.values():
+        if s.is_function and not s.is_import and s.addr:
+            starts[s.addr] = "symbol"
+            if s.size > 0:
+                sym_by_addr[s.addr] = s
 
     for pc, src in _eh_frame_starts(img).items():
         starts.setdefault(pc, src)
     for pc, src in _plt_got_seeds(img).items():
-        # only keep PLT seeds that land in executable text (skip pure PLT trampoline if outside)
         if any(lo <= pc < hi for lo, hi in text_ranges):
             starts.setdefault(pc, src)
 
-    for s in img.symbols.values():
-        if s.is_function and not s.is_import and s.addr:
-            starts[s.addr] = "symbol"
+    has_precise_functions = len(starts) >= 10
+    for base, data in _exec_sections(img):
+        if not has_precise_functions or len(data) <= 400_000:
+            _scan_prologues(data, base, starts)
+        if not has_precise_functions and len(data) <= 2_000_000 and len(starts) < max_starts // 2:
+            _scan_call_targets(img, data, base, starts)
 
     # Always include program entry
     if img.entry and any(lo <= img.entry < hi for lo, hi in text_ranges):
@@ -265,6 +272,10 @@ def build_func_index(img: BinaryImage, *, max_starts: int = 80_000) -> FuncIndex
 
     bounds: Dict[int, FuncBound] = {}
     for i, st in enumerate(ordered):
+        if st in sym_by_addr and sym_by_addr[st].size > 0:
+            end = st + sym_by_addr[st].size
+            bounds[st] = FuncBound(st, end, source="pdata" if "sub_" in sym_by_addr[st].name else "symbol")
+            continue
         nxt = ordered[i + 1] if i + 1 < len(ordered) else st + 0x2000
         for lo, hi in text_ranges:
             if lo <= st < hi:

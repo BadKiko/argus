@@ -9,24 +9,20 @@ from typing import Any, Dict, List, Optional, Tuple
 from argus.memory.features import extract_binary_features
 
 _GATE_SIGNAL_RX = re.compile(
-    r"(unlock|license|лиценз|активац|register|unregistered|trial|serial)",
+    r"(unlock|license|лиценз|активац|register|unregistered|trial|serial|"
+    r"restriction|entitlement|activation|verify|check|bypass|gate|"
+    r"убери\s+про|remove\s+licen|transform)",
     re.IGNORECASE,
 )
 _PATCH_RX = re.compile(r"(patch|замен|replace|строк|text|title|ui)", re.IGNORECASE)
 _LIFT_RX = re.compile(r"(lift|deobf|cff|unpack|декомп)", re.IGNORECASE)
 
+from argus.llm.tools import ARGUS_TOOLS
+
 _ARGUS_TOOLS = {
-    "argus_ai",
-    "argus_analyze",
-    "argus_detect",
-    "argus_find",
-    "argus_lift",
-    "argus_patch",
-    "argus_slice",
-    "argus_apply_plan",
-    "argus_discover",
-    "argus_cfg",
-    "argus_deobf",
+    t["function"]["name"]
+    for t in ARGUS_TOOLS
+    if isinstance(t, dict) and isinstance(t.get("function"), dict) and t["function"].get("name")
 }
 
 
@@ -203,6 +199,7 @@ def build_case_report(
     user_feedback: str = "",
     user_confirmed: bool = False,
     runtime_launch: Optional[Dict[str, Any]] = None,
+    planner: str = "llm",
 ) -> Optional[Dict[str, Any]]:
     strategies = [_parse_trace_entry(e) for e in tool_trace]
     strategies = [s for s in strategies if s.get("tool") in _ARGUS_TOOLS]
@@ -224,6 +221,14 @@ def build_case_report(
 
     plan_sourced = _plan_sourced(tool_trace)
     features["plan_sourced"] = plan_sourced
+    features["planner"] = planner
+    tool_sequence = [
+        str(e.get("tool") or "")
+        for e in tool_trace
+        if str(e.get("tool") or "").startswith("argus_")
+    ]
+    if tool_sequence:
+        features["tool_sequence"] = tool_sequence
     if user_confirmed:
         features["user_confirmed"] = True
     if user_feedback:
@@ -275,7 +280,7 @@ def build_case_report(
         "plan_sourced": plan_sourced,
         "verification_level": verification_level,
         "failure_modes": failure_modes[:8],
-        "cost": {"steps": steps, "tool_calls": len(tool_trace)},
+        "cost": {"steps": steps, "tool_calls": len(tool_trace), "planner": planner},
         "modules_patched": _modules_patched(tool_trace),
         "client_version": feats["client_version"],
     }

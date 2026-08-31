@@ -41,9 +41,14 @@ class Explorer:
         stdin_len: int = 24,
         entry: Optional[int] = None,
         find_needle: Optional[bytes] = None,
+        concrete_stdin: Optional[bytes] = None,
     ) -> SolveResult:
         avoid = avoid or set()
-        initial = self.engine.make_entry_state(entry=entry, stdin_len=stdin_len)
+        initial = self.engine.make_entry_state(
+            entry=entry,
+            stdin_len=stdin_len,
+            concrete_stdin=concrete_stdin,
+        )
         # Dual buckets: concrete (no/few constraints) vs symbolic
         concrete_q: List[SimState] = [initial]
         symbolic_q: List[SimState] = []
@@ -85,8 +90,16 @@ class Explorer:
 
         return SolveResult(False, None, b"", None, explored, "exhausted search")
 
-    def solve_find_string(self, needle: bytes, stdin_len: int = 24) -> SolveResult:
-        initial = self.engine.make_entry_state(stdin_len=stdin_len)
+    def solve_find_string(
+        self,
+        needle: bytes,
+        stdin_len: int = 24,
+        concrete_stdin: Optional[bytes] = None,
+    ) -> SolveResult:
+        initial = self.engine.make_entry_state(
+            stdin_len=stdin_len,
+            concrete_stdin=concrete_stdin,
+        )
         concrete_q: List[SimState] = [initial]
         symbolic_q: List[SimState] = []
         explored = 0
@@ -147,27 +160,39 @@ class Explorer:
         return True, assignments, bytes(raw)
 
 
-def solve_binary(path: str, find: Optional[bytes] = None) -> SolveResult:
+def solve_binary(
+    path: str,
+    find: Optional[bytes] = None,
+    *,
+    note: str = "",
+) -> SolveResult:
     from argus.binary import load_binary
+    from argus.concrete.concolic import concrete_until_branch, parse_stdin_hint
 
     image = load_binary(path)
-    # Optional concrete warm-up (does not replace symbolic solve)
+    hinted = parse_stdin_hint(note)
+    seed_stdin = hinted or b"A" * 16 + b"\n"
+    seed = None
     try:
-        from argus.concrete.concolic import concrete_until_branch
-
-        concrete_until_branch(image, stdin=b"A" * 16 + b"\n")
+        seed = concrete_until_branch(image, stdin=seed_stdin)
     except Exception:
         pass
+    concrete_stdin = None
+    if hinted:
+        concrete_stdin = seed.stdin if seed and seed.stdin else hinted
     ex = Explorer(image)
     if "accepted" in image.symbols:
         avoid = set()
         if "rejected" in image.symbols:
             avoid.add(image.symbols["rejected"].addr)
         return ex.solve_to_address(
-            image.symbols["accepted"].addr, avoid=avoid, find_needle=find
+            image.symbols["accepted"].addr,
+            avoid=avoid,
+            find_needle=find,
+            concrete_stdin=concrete_stdin,
         )
     if not find:
         return SolveResult(
             False, None, b"", None, 0, "find needle required (no hardcoded success string)"
         )
-    return ex.solve_find_string(find)
+    return ex.solve_find_string(find, concrete_stdin=concrete_stdin)

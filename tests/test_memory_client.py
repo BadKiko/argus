@@ -80,11 +80,21 @@ def test_retrieve_hints_format(monkeypatch):
         inst = MC.return_value
         inst.available = True
         inst.search_hints.return_value = [
-            {"score": 0.9, "outcome": "success", "summary": "slice+apply_plan", "verification_level": "EXECUTION_VERIFIED"}
+            {
+                "score": 0.9,
+                "outcome": "success",
+                "summary": "path:slice→apply_plan",
+                "verification_level": "EXECUTION_VERIFIED",
+                "strategies": [
+                    {"tool": "argus_slice", "ok": True},
+                    {"tool": "argus_apply_plan", "ok": True},
+                ],
+            }
         ]
         block = retrieve_hints(str(SAMPLES / "fauxware"), "unlock license")
         assert "Prior experience" in block
-        assert "slice+apply_plan" in block
+        assert "path:" in block
+        assert "slice" in block
 
 
 def test_memory_enabled_by_default():

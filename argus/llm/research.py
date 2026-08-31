@@ -49,8 +49,8 @@ def _web_hints(query: str, *, max_chars: int = 900) -> str:
         return ""
     try:
         url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-        req = urllib.request.Request(url, headers={"User-Agent": "argus-agent/1.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
             html = resp.read().decode("utf-8", errors="replace")
     except Exception:
         return ""
@@ -72,7 +72,6 @@ def build_research_brief(
     discover: Optional[dict] = None,
     research_round: int = 1,
 ) -> str:
-    from argus.llm.intent import classify_task_intent, routing_hint
     from argus.llm.tasks import _evaluate_tasks
 
     statuses = _evaluate_tasks(tasks, tool_trace, binary=binary or original_binary)
@@ -81,8 +80,8 @@ def build_research_brief(
     tried = _tools_tried(tool_trace)
 
     lines: List[str] = [
-        f"RESEARCH PHASE (round {research_round}) — задачи ещё НЕ закрыты. НЕ сдавайся.",
-        "Продолжай вызывать tools до evidence done. Текст без tools не завершает задачу.",
+        f"RESEARCH PHASE (round {research_round}) — tasks still open; continue with tools.",
+        "Model prose alone does not complete tasks — tool verify required.",
     ]
     if original_binary and binary and original_binary != binary:
         lines.append(f"Work copy (patch ONLY this): {binary}")
@@ -90,12 +89,15 @@ def build_research_brief(
     elif binary:
         lines.append(f"Binary: {binary}")
 
-    hint = routing_hint(user_prompt, binary=original_binary or binary, discover=discover)
-    if hint:
-        lines.append(hint)
+    try:
+        from argus.llm.intent import format_task_signals
+
+        lines.append(format_task_signals(user_prompt, binary=original_binary or binary, discover=discover))
+    except Exception:
+        pass
 
     lines.append("")
-    lines.append("Открытые задачи:")
+    lines.append("Open tasks:")
     for s in open_tasks:
         lines.append(f"  {s.task.id}. «{s.task.text}» → {s.status}: {s.detail}")
         if s.explanation:
@@ -110,29 +112,33 @@ def build_research_brief(
 
     if tried:
         lines.append("")
-        lines.append("Уже пробовали: " + ", ".join(tried))
+        lines.append("Tools already tried: " + ", ".join(tried))
+
+    slice_len = 0
+    for entry in tool_trace:
+        if entry.get("tool") not in ("argus_slice", "argus_investigate"):
+            continue
+        raw = entry.get("result")
+        payload = raw if isinstance(raw, dict) else {}
+        if not payload:
+            try:
+                payload = json.loads(entry.get("result_preview") or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+        plan = payload.get("patch_plan") or (payload.get("evidence") or {}).get("patch_plan") or []
+        if isinstance(plan, list):
+            slice_len = max(slice_len, len(plan))
 
     lines.append("")
-    lines.append("Стратегия (выбери новый angle, не повторяй слепо):")
-    intent = classify_task_intent(user_prompt, binary=original_binary or binary)
-    if intent.value == "password":
-        lines.extend(
-            [
-                "  • argus_slice → argus_apply_plan (patch_plan)",
-                "  • или argus_ai / argus_solve для пароля",
-                "  • bypass: behavior verify на patched copy",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "  • argus_analyze + argus_find + argus_slice",
-                "  • argus_discover для sibling DLL/SO",
-                "  • argus_apply_plan только с slice plan",
-            ]
-        )
-    lines.append("  • argus_research(query=...) для сводки + web hints")
-    lines.append("  • pivot: другой addr/kind/module из evidence")
+    lines.append("Evidence gaps (pick next experiment):")
+    if "investigate" not in tried:
+        lines.append("  • no investigate yet — observations may help")
+    if "find" not in tried:
+        lines.append("  • no find yet — need query/needle from task")
+    if slice_len == 0:
+        lines.append(f"  • patch_plan empty (max_len={slice_len})")
+    if failures:
+        lines.append("  • prior tool failures — try different anchor or diagnose_failure")
 
     base = Path(original_binary or binary or "").name
     web_q = f"{base} crackme reverse engineering {user_prompt[:60]}"

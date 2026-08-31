@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.table import Table
 
 from argus import __version__
+from argus.ask import PatchKind, Want
 
 console = Console()
 
@@ -362,43 +363,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_ai(args: argparse.Namespace) -> int:
-    """Natural language: argus ai \"дай пароль для админа\" app.exe"""
-    import json
-
-    from argus.nl import ai, parse_prompt
-
-    if not Path(args.binary).is_file():
-        console.print(f"нет файла: {args.binary}")
-        return 1
-
-    hint = parse_prompt(args.prompt, output=args.output)
-    console.print(f"intent want={hint.want.value} patch={hint.patch_kind} fn={hint.function!r}")
-    res = ai(args.binary, args.prompt, output=args.output)
-    if args.json:
-        Path(args.json).write_text(json.dumps(res.to_dict(), indent=2))
-        console.print(f"wrote {args.json}")
-    # Human/agent primary output
-    if res.ok and res.readable and res.want in ("lift", "ir", "report"):
-        console.print(res.readable[:8000], markup=False)
-    elif res.ok and res.answer:
-        console.print(res.answer)
-    elif res.ok and res.readable:
-        console.print(res.readable[:8000], markup=False)
-    elif res.ok and res.patched_path:
-        console.print(res.patched_path)
-    else:
-        console.print(f"failed: {'; '.join(res.notes)}")
-        if args.verbose:
-            console.print(json.dumps(res.to_dict(), indent=2))
-        return 1
-    if args.verbose:
-        console.print(json.dumps(res.to_dict(), indent=2))
-    if res.patched_path and res.answer:
-        console.print(f"patched {res.patched_path}")
-    return 0 if res.ok else 1
-
-
 def cmd_memory(args: argparse.Namespace) -> int:
     """Query remote Argus memory backend."""
     import json
@@ -417,6 +381,33 @@ def cmd_memory(args: argparse.Namespace) -> int:
         return 0
     console.print(f"unknown memory subcommand: {args.memory_cmd}")
     return 1
+
+
+def cmd_debug_fast_path(args: argparse.Namespace) -> int:
+    """Legacy deterministic gate pipeline (opt-in — agent uses LLM by default in 0.5)."""
+    import json
+
+    from argus.llm.autopilot import run_gate_fast_path
+    from argus.llm.session import reset_session
+    from argus.llm.workspace import prepare_work_binary
+
+    if not args.binary:
+        console.print("[red]binary path required[/red]")
+        return 1
+    reset_session()
+    work, orig = prepare_work_binary(args.binary)
+    fp = run_gate_fast_path(
+        work,
+        args.prompt,
+        original_binary=orig,
+        verbose=bool(args.verbose),
+    )
+    if args.json:
+        Path(args.json).write_text(json.dumps(fp, ensure_ascii=False, indent=2), encoding="utf-8")
+    console.print(f"done={fp.get('done')} trace_len={len(fp.get('trace') or [])}")
+    if fp.get("result"):
+        console.print(json.dumps(fp["result"], ensure_ascii=False, indent=2)[:4000])
+    return 0 if fp.get("done") else 1
 
 
 def cmd_agent(args: argparse.Namespace) -> int:
@@ -441,7 +432,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
     provider = resolve_provider(args.provider)
     model = args.model
     if provider == "gemini" and not model:
-        model = "gemini-3.6-flash"
+        model = "gemini-3.5-flash-lite"
 
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     if getattr(args, "no_interactive", False):
@@ -516,9 +507,18 @@ def cmd_agent(args: argparse.Namespace) -> int:
     except Exception as e:
         console.print(f"agent error: {e}")
         return 1
+    if res.steps == 0 and res.planner == "fast_path_legacy":
+        console.print(
+            "[yellow]warning:[/yellow] finished with steps=0 via legacy fast-path "
+            "(set ARGUS_FAST_PATH=0 for LLM-only planning)"
+        )
+    elif res.steps == 0:
+        console.print(
+            "[yellow]warning:[/yellow] agent finished with steps=0 — model may not have run tools"
+        )
     console.print(f"[{res.provider}] {res.answer}")
     if args.json:
-        Path(args.json).write_text(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
+        Path(args.json).write_text(json.dumps(res.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
         console.print(f"wrote {args.json}")
     if verbose and not trace_ui:
         for t in res.tool_trace:
@@ -734,7 +734,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ask_p = sp.add_parser(
         "ask",
-        help="Structured intent API (prefer: argus ai \"…\" binary)",
+        help="Structured intent API (e.g. argus ask --want lift -f main binary)",
     )
     ask_p.add_argument("binary")
     ask_p.add_argument(
@@ -747,25 +747,19 @@ def build_parser() -> argparse.ArgumentParser:
     ask_p.add_argument("--hint", default="", help="Free-text hint from the LLM")
     ask_p.add_argument(
         "--patch-kind",
-        choices=[
-            "always_true",
-            "always_false",
-            "unflatten",
-            "nop_prompts",
-            "force_branch",
-            "skip_check",
-            "nop_bytes",
-            "ret_imm",
-            "replace_string",
-        ],
+        choices=[k.value for k in PatchKind],
+        help="Patch intent",
     )
     ask_p.add_argument("-o", "--output", help="Patched/deobf output path")
-    ask_p.add_argument("--find", default=None, help="Success needle for password (required for password want)")
+    ask_p.add_argument("--find", default=None, help="Success needle for password")
     ask_p.add_argument("--entry", help="Optional entry VA")
-    ask_p.add_argument("--query", help="String query → xref → function (stripped lift)")
+    ask_p.add_argument("--query", help="String query → xref → function")
     ask_p.add_argument("--branch", help="VA for force_branch")
     ask_p.add_argument("--force-not-taken", action="store_true")
-    ask_p.add_argument("--json", help="Write AskResult JSON")
+    ask_p.add_argument("--ret-value", type=int, help="Immediate value for ret_imm")
+    ask_p.add_argument("--note", default="", help="Freeform note for certificate/log")
+    ask_p.add_argument("--json", help="Write full AskResult JSON")
+    ask_p.add_argument("-v", "--verbose", action="store_true", help="Dump full result")
     ask_p.set_defaults(func=cmd_ask)
 
     lift_p = sp.add_parser(
@@ -779,14 +773,6 @@ def build_parser() -> argparse.ArgumentParser:
     lift_p.add_argument("--json", help="Write AskResult JSON")
     lift_p.add_argument("--ir", action="store_true", help="Emit JSON IR instead of pseudo-C")
     lift_p.set_defaults(func=cmd_lift)
-
-    ai_p = sp.add_parser("ai", help='Natural language router (no LLM): argus ai "дай пароль" app.exe')
-    ai_p.add_argument("prompt", help="Request in Russian or English")
-    ai_p.add_argument("binary", help="Path to ELF/PE (Windows paths ok)")
-    ai_p.add_argument("-o", "--output", help="Output path for patch/deobf")
-    ai_p.add_argument("--json", help="Also write full AskResult JSON")
-    ai_p.add_argument("-v", "--verbose", action="store_true", help="Dump full result")
-    ai_p.set_defaults(func=cmd_ai)
 
     ag = sp.add_parser(
         "agent",
@@ -811,7 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ag.add_argument("--url", help="API base URL (openai compat, or gemini v1beta root)")
     ag.add_argument("--key", help="API key (GEMINI_API_KEY / OPENAI_API_KEY)")
-    ag.add_argument("--model", help="Model id (e.g. gemini-2.0-flash or gpt-4o-mini)")
+    ag.add_argument("--model", help="Model id (e.g. gemini-3.5-flash-lite or gpt-4o-mini)")
     ag.add_argument(
         "--max-steps",
         type=int,
@@ -866,6 +852,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ag.set_defaults(func=cmd_agent)
 
+    dbg = sp.add_parser("debug", help="Debug / legacy pipelines (not used by default agent)")
+    dbg_sub = dbg.add_subparsers(dest="debug_cmd", required=True)
+    fp = dbg_sub.add_parser(
+        "fast-path",
+        help="Run legacy gate fast-path without LLM (ARGUS_FAST_PATH for agent)",
+    )
+    fp.add_argument("prompt", help="Task text")
+    fp.add_argument("binary", help="Path to binary")
+    fp.add_argument("--json", help="Write result JSON")
+    fp.add_argument("-v", "--verbose", action="store_true")
+    fp.set_defaults(func=cmd_debug_fast_path)
+
     mem = sp.add_parser("memory", help="Remote case memory (vector search on argus.cloud.badkiko.ru)")
     mem_sub = mem.add_subparsers(dest="memory_cmd", required=True)
     mem_search = mem_sub.add_parser("search", help="Search similar past cases")
@@ -886,6 +884,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    if sys.platform == "win32":
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            if hasattr(sys.stderr, "reconfigure"):
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     parser = build_parser()
     args = parser.parse_args(argv)
     rc = args.func(args)

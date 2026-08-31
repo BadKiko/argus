@@ -5,7 +5,7 @@ from typing import Dict
 
 import pefile
 
-from .image import BinaryImage, Section, Symbol
+from .image import BinaryImage, Section, Symbol, SparseMemory
 
 
 def load_pe(path: Path) -> BinaryImage:
@@ -14,6 +14,7 @@ def load_pe(path: Path) -> BinaryImage:
         directories=[
             pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
             pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"],
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXCEPTION"],
         ]
     )
 
@@ -24,7 +25,6 @@ def load_pe(path: Path) -> BinaryImage:
     entry = image_base + int(pe.OPTIONAL_HEADER.AddressOfEntryPoint)
 
     sections: list[Section] = []
-    memory: Dict[int, int] = {}
     for s in pe.sections:
         name = s.Name.decode("utf-8", errors="ignore").strip("\x00")
         addr = image_base + int(s.VirtualAddress)
@@ -42,8 +42,6 @@ def load_pe(path: Path) -> BinaryImage:
                 readable=bool(chars & 0x40000000),
             )
         )
-        for i, b in enumerate(data):
-            memory[addr + i] = b
 
     symbols: Dict[str, Symbol] = {}
     imports: Dict[int, str] = {}
@@ -66,6 +64,18 @@ def load_pe(path: Path) -> BinaryImage:
             addr = image_base + int(exp.address)
             symbols[name] = Symbol(name=name, addr=addr, is_function=True)
 
+    # Windows x64 .pdata: exact runtime functions table (O(1) function recovery)
+    if hasattr(pe, "DIRECTORY_ENTRY_EXCEPTION"):
+        for entry_exc in pe.DIRECTORY_ENTRY_EXCEPTION:
+            st = getattr(entry_exc, "struct", None)
+            if not st:
+                continue
+            begin = image_base + int(st.BeginAddress)
+            end = image_base + int(st.EndAddress)
+            name = f"sub_{begin:x}"
+            if name not in symbols:
+                symbols[name] = Symbol(name=name, addr=begin, size=max(1, end - begin), is_function=True)
+
     pe.close()
     return BinaryImage(
         path=str(path),
@@ -76,7 +86,7 @@ def load_pe(path: Path) -> BinaryImage:
         sections=sections,
         symbols=symbols,
         imports=imports,
-        memory=memory,
+        memory=SparseMemory(sections),
     )
 
 

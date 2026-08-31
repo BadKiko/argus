@@ -22,7 +22,7 @@ from argus.llm.tools import ARGUS_TOOLS
 
 
 DEFAULT_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
-DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 # Free-tier 429s often ask ~20s; wait a full minute so the next request usually succeeds.
 RATE_LIMIT_WAIT_SEC = 60.0
 
@@ -263,7 +263,7 @@ class GeminiClient:
                 if attempt >= max_attempts:
                     raise RuntimeError(
                         f"Gemini timed out after {self.config.timeout}s for model={self.config.model}. "
-                        f"Try --model gemini-3.6-flash."
+                        f"Try --model gemini-3.5-flash-lite."
                     ) from e
                 time.sleep(min(2.0 * attempt, 8.0))
                 continue

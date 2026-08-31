@@ -57,6 +57,82 @@ _MAX_COVER_STUB = 0x1800  # bigger → likely UI/app shell; stubbing entry kills
 _PARSER_FN = 0xC00
 
 
+def format_slice_facts(
+    *,
+    patch_plan: List[Dict[str, Any]],
+    gates: List[Dict[str, Any]],
+    modules_scanned: int = 1,
+    query: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Factual slice summary for LLM (not imperative APPLY/PIVOT)."""
+    non_ui = [g for g in gates if not g.get("ui_label_only")]
+    parts = [
+        f"plan_steps={len(patch_plan)}",
+        f"gates={len(gates)} non_ui={len(non_ui)}",
+        f"modules_scanned={modules_scanned}",
+    ]
+    if query:
+        parts.append(f"query={query[:48]!r}")
+    else:
+        parts.append("query_missing=true")
+    if patch_plan:
+        s0 = patch_plan[0]
+        parts.append(
+            f"primary={s0.get('kind')}@{s0.get('addr')} "
+            f"confidence={s0.get('confidence', '?')}"
+        )
+    if extra:
+        for k, v in extra.items():
+            parts.append(f"{k}={v}")
+    return "; ".join(parts)
+
+
+def slice_tool_hints(
+    *,
+    patch_plan: List[Dict[str, Any]],
+    query: Optional[str] = None,
+    reject_ui_candidates: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Ranked suggestions — LLM chooses; never auto-executed."""
+    suggested: List[Dict[str, Any]] = []
+    if not query:
+        suggested.append(
+            {"tool": "argus_find", "reason": "pass query= from user task wording", "confidence": 0.85}
+        )
+        if reject_ui_candidates:
+            suggested.append(
+                {
+                    "tool": "argus_diagnose_failure",
+                    "reason": "pick error_text from reject_ui_candidates",
+                    "confidence": 0.75,
+                }
+            )
+    elif patch_plan:
+        suggested.append(
+            {
+                "tool": "argus_decision_flow",
+                "reason": "inspect gates before apply_plan",
+                "confidence": 0.6,
+            }
+        )
+        suggested.append(
+            {
+                "tool": "argus_apply_plan",
+                "reason": "copy patch_plan into steps= after review",
+                "confidence": 0.65,
+            }
+        )
+    else:
+        suggested.append(
+            {"tool": "argus_discover", "reason": "empty plan — scan install dir modules", "confidence": 0.7}
+        )
+        suggested.append(
+            {"tool": "argus_slice", "reason": "re-slice with modules= from discover", "confidence": 0.65}
+        )
+    return {"suggested_tools": suggested}
+
+
 def _is_format_marker_string(text: str) -> bool:
     """Section/header rodata — not an executable validation failure path."""
     s = (text or "").strip()
@@ -313,7 +389,11 @@ def plan_is_confident(plan: List[Dict[str, Any]]) -> bool:
     if not plan:
         return False
     conf = _step_confidence(plan[0])
-    return conf == "high"
+    if conf == "high":
+        return True
+    if conf == "medium" and int(plan[0].get("score") or 0) >= 400:
+        return True
+    return False
 
 
 def _disasm_at(img, addr: int, *, before: int = 2, after: int = 4) -> List[str]:
@@ -608,6 +688,7 @@ def build_patch_plan(
             "module": g.get("module"),
             "confidence": _gate_confidence(g),
             "structural_nearby": bool(g.get("structural_nearby")),
+            "score": int(g.get("score") or 0),
         }
         if g.get("kind") == "force_branch":
             step["taken"] = bool(g.get("taken", False))
@@ -733,14 +814,37 @@ def gate_scan(
     hits: List[Dict[str, Any]] = []
     seen: set[int] = set()
 
-    work: List[Tuple[bytes, str]] = [(s, "validate") for s in _VALIDATE_SUBS]
-    if query:
-        qb = query.encode("utf-8", errors="replace")
-        if len(qb) >= 8 or (b" " in qb and len(qb) >= 5):
+    if not query:
+        from argus.flow import discover_reject_ui_strings
+
+        candidates = discover_reject_ui_strings(img, limit=12)
+        facts = format_slice_facts(
+            patch_plan=[],
+            gates=[],
+            modules_scanned=1,
+            query=None,
+            extra={"candidates": len(candidates)},
+        )
+        return {
+            "ok": True,
+            "summary": f"gate_scan: pass query= or pick from reject_ui_candidates ({len(candidates)})",
+            "module": module_path,
+            "string_hits": [],
+            "gate_candidates": [],
+            "patch_plan": [],
+            "patch_site_previews": [],
+            "reject_ui_candidates": candidates,
+            "next_hint": facts,
+            "hints": slice_tool_hints(patch_plan=[], query=None, reject_ui_candidates=candidates),
+        }
+
+    work: List[Tuple[bytes, str]] = []
+    qb = query.encode("utf-8", errors="replace")
+    if len(qb) >= 8 or (b" " in qb and len(qb) >= 5):
+        work.append((qb, "query"))
+    elif len(qb) >= 3:
+        if b"_" in qb or any(c.isupper() for c in query):
             work.append((qb, "query"))
-        elif len(qb) >= 3:
-            if b"_" in qb or any(c.isupper() for c in query):
-                work.append((qb, "query"))
     work.extend((s, "ui") for s in _UI_SUBS)
 
     for substr, kind in work:
@@ -963,43 +1067,13 @@ def gate_scan(
         s.setdefault("module", module_path)
     previews = patch_site_previews(patch_plan, modules={module_path: img})
 
-    if patch_plan:
-        s0 = patch_plan[0]
-        conf = s0.get("confidence") or _step_confidence(s0)
-        if s0.get("string_kind") == "password" or s0.get("nearby_fn") == "authenticate":
-            next_hint = (
-                f"PASSWORD crackme: argus_apply_plan patch_plan ({len(patch_plan)} steps); "
-                f"first {s0.get('kind')} addr={s0.get('addr')} (authenticate stub). "
-                f"Not a gate transform — behavior verify must pass."
-            )
-        elif conf == "low":
-            next_hint = (
-                f"WEAK plan (confidence={conf}) — likely template/parser gate. "
-                f"PIVOT: argus_slice multi=true to scan linked SO/DLL, or argus_discover. "
-                f"First step {s0.get('kind')} addr={s0.get('addr')}."
-            )
-        else:
-            next_hint = (
-                f"APPLY: argus_apply_plan with patch_plan ({len(patch_plan)} steps); "
-                f"first {s0.get('kind')} addr={s0.get('addr')} confidence={conf}. "
-                f"Success requires verify.ok with behavior smoke (not bytes-only)."
-            )
-    elif non_ui:
-        pick = non_ui[0]
-        next_hint = (
-            f"No structured plan — try argus_apply_plan or patch "
-            f"kind={pick.get('kind')} addr={pick.get('addr')} ui_label_only=false."
-        )
-    elif gates_out:
-        next_hint = (
-            "Only UI-ish gates — PIVOT: argus_discover / argus_slice modules= other DLL/SO; "
-            "do not claim license removed."
-        )
-    else:
-        next_hint = (
-            "No license xrefs here — PIVOT: argus_discover then slice linked/candidates "
-            "(gate often lives in a sibling .dll/.so), not only this binary."
-        )
+    next_hint = format_slice_facts(
+        patch_plan=patch_plan,
+        gates=gates_out,
+        modules_scanned=1,
+        query=query,
+    )
+    hints = slice_tool_hints(patch_plan=patch_plan, query=query)
 
     return {
         "ok": True,
@@ -1021,6 +1095,7 @@ def gate_scan(
             if g.get("kind") == "ret_imm"
         ],
         "next_hint": next_hint,
+        "hints": hints,
         "stripped_like": True,
         "module": module_path,
     }
@@ -1167,33 +1242,17 @@ def gate_scan_modules(
     non_ui = [g for g in all_gates[:limit] if not g.get("ui_label_only")]
     mod_imgs: Dict[str, Any] = {}
     previews = patch_site_previews(patch_plan, modules=mod_imgs)
-    if patch_plan:
-        s0 = patch_plan[0]
-        conf = s0.get("confidence") or _step_confidence(s0)
-        pivot_note = f" (pivoted into {widened_from[0]})" if pivoted and widened_from else ""
-        if conf == "low":
-            next_hint = (
-                f"WEAK plan confidence={conf} — scan linked modules or pivot. "
-                f"first {s0.get('kind')} addr={s0.get('addr')} module={s0.get('module')}"
-                f"{pivot_note}."
-            )
-        else:
-            next_hint = (
-                f"APPLY: argus_apply_plan patch_plan ({len(patch_plan)} steps); "
-                f"first {s0.get('kind')} addr={s0.get('addr')} module={s0.get('module')} "
-                f"confidence={conf}{pivot_note}. Behavior verify required for done."
-            )
-    elif pivoted:
-        next_hint = (
-            "Pivoted across nearby binaries — still no patch_plan. "
-            "Call argus_discover for more candidates, or argus_slice with modules=[...] / another query."
-        )
-    else:
-        next_hint = (
-            "No patch_plan in primary/linked. "
-            "PIVOT: argus_discover then argus_slice on other candidates "
-            "(license often in DLL/SO), or pass modules=[]."
-        )
+    extra_facts: Dict[str, Any] = {}
+    if pivoted and widened_from:
+        extra_facts["pivoted_from"] = widened_from[0]
+    next_hint = format_slice_facts(
+        patch_plan=patch_plan,
+        gates=all_gates[:limit],
+        modules_scanned=len(per_module),
+        query=query,
+        extra=extra_facts or None,
+    )
+    hints = slice_tool_hints(patch_plan=patch_plan, query=query)
 
     return {
         "ok": True,
@@ -1214,5 +1273,6 @@ def gate_scan_modules(
         "patch_plan": patch_plan,
         "patch_site_previews": previews,
         "next_hint": next_hint,
+        "hints": hints,
         "module": primary,
     }

@@ -8,51 +8,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from argus.binary import load_binary
 
-# Longer / more specific first — short tokens like "serial" flood Qt binaries
-PHRASE_KEYWORDS = [
-    "running free version",
-    "running free",
-    "free version",
-    "invalid license",
-    "license expired",
-    "license key",
-    "no license",
-    "trial expired",
-    "unregistered",
-    "activation required",
-    "license check",
-]
+# Universal keywords (query-driven; empty default to keep engine generic)
+DEFAULT_KEYWORDS: List[str] = []
 
-DEFAULT_KEYWORDS = PHRASE_KEYWORDS + [
-    "license",
-    "licence",
-    "trial",
-    "activate",
-    "activation",
-    "expired",
-    "subscription",
-    "лиценз",
-    "активац",
-    "парол",
-    "password",
-]
-
-# Soft gate-name filter — structural patterns only (not a vendor unlock recipe)
-# Prefix must be a CamelCase/API token (not "ise" inside Premise)
+# Soft gate-name filter — structural patterns only (generic predicate checks)
 _GATE_NAME_RE = re.compile(
-    r"(?:^|[^A-Za-z])(Is|Check|Verify|Validate|Has)"
+    r"(?:^|[^A-Za-z])(Is|Check|Verify|Validate|Has|Can|Should|Auth)"
     r"(?=[A-Z0-9_])[A-Za-z0-9_]*"
-    r"(Licen[cs]e|Trial|Genuine|Activat)"
 )
-# Unmangled C-style API: IsLicenseGenuine, CheckTrial, …
+# Unmangled C-style API: IsValid, CheckAccess, VerifySignature, etc.
 _GATE_SHORT_RE = re.compile(
-    r"^(Is|Check|Verify|Validate|Has)"
-    r"(?=([A-Z0-9_]))[A-Za-z0-9_]{0,48}"
-    r"(Licen[cs]e|Trial|Genuine|Valid|Activat)[A-Za-z0-9_]*$"
+    r"^(Is|Check|Verify|Validate|Has|Can|Should|Auth)[A-Za-z0-9_]*$"
 )
-# Mangled C++ method leaf: …12isActivatedEv / …14isTrialValidEv (no product names)
+# Mangled C++ method leaf
 _GATE_MANGLED_BOOL_RE = re.compile(
-    r"_ZN\d+\w+\d+(isActivated|isActivatedOffline|isTrialValid|hasLicense|isLicensed)Ev$"
+    r"_ZN\d+\w+\d+(is|check|verify|validate|has|can|should|auth)[A-Za-z0-9_]*Ev$",
+    re.IGNORECASE,
 )
 _GATE_NOISE_RE = re.compile(
     r"(?i)(\.cold$|_ZTV|_ZTI|_ZTS|qt_meta|nlohmann|basic_json|TypeAndForceComplete|"
@@ -270,46 +241,80 @@ def find_rodata_vicinity_xrefs(
     Stripped/Delphi binaries often reference the middle of a rodata blob, not the
     string start VA. Scan executable sections for 32/64-bit pointers into [target±radius].
     """
-    import struct
-
     if img.arch not in ("x86_64", "x86") or not target:
         return []
     lo, hi = target - radius, target + radius
     out: List[Dict[str, Any]] = []
     seen: set[int] = set()
+
+    try:
+        import numpy as np
+        has_numpy = True
+    except ImportError:
+        has_numpy = False
+
     for sec in img.sections:
         if not sec.executable or not sec.data:
             continue
         data = sec.data
-        for i in range(0, len(data) - 3):
-            for fmt in ("<I", "<Q") if img.bits == 64 else ("<I",):
-                if fmt == "<Q" and i + 8 > len(data):
+        if has_numpy:
+            align_shifts = 8 if img.bits == 64 else 4
+            dtype = np.uint64 if img.bits == 64 else np.uint32
+            for shift in range(align_shifts):
+                chunk_len = (len(data) - shift) // align_shifts * align_shifts
+                if chunk_len <= 0:
                     continue
-                if fmt == "<I" and i + 4 > len(data):
-                    continue
-                size = 8 if fmt == "<Q" else 4
-                try:
-                    v = struct.unpack_from(fmt, data, i)[0]
-                except struct.error:
-                    continue
-                if not (lo <= v <= hi):
-                    continue
-                site = sec.addr + i
-                if site in seen:
-                    continue
-                seen.add(site)
-                out.append(
-                    {
-                        "addr": hex(site),
-                        "mnemonic": "rodata_vicinity",
-                        "op_str": hex(v),
-                        "nearby_fn": _nearby_fn(img, site),
-                        "kind": "vicinity",
-                        "target_ref": hex(v),
-                    }
-                )
-                if len(out) >= max_hits:
-                    return out
+                arr = np.frombuffer(data[shift : shift + chunk_len], dtype=dtype)
+                matches = np.flatnonzero((arr >= lo) & (arr <= hi))
+                for m in matches:
+                    idx = int(m) * align_shifts + shift
+                    site = sec.addr + idx
+                    if site in seen:
+                        continue
+                    seen.add(site)
+                    val = int(arr[m])
+                    out.append(
+                        {
+                            "addr": hex(site),
+                            "mnemonic": "rodata_vicinity",
+                            "op_str": hex(val),
+                            "nearby_fn": _nearby_fn(img, site),
+                            "kind": "vicinity",
+                            "target_ref": hex(val),
+                        }
+                    )
+                    if len(out) >= max_hits:
+                        return out
+        else:
+            import struct
+            for i in range(0, len(data) - 3):
+                for fmt in ("<I", "<Q") if img.bits == 64 else ("<I",):
+                    if fmt == "<Q" and i + 8 > len(data):
+                        continue
+                    if fmt == "<I" and i + 4 > len(data):
+                        continue
+                    try:
+                        v = struct.unpack_from(fmt, data, i)[0]
+                    except struct.error:
+                        continue
+                    if not (lo <= v <= hi):
+                        continue
+                    site = sec.addr + i
+                    if site in seen:
+                        continue
+                    seen.add(site)
+                    out.append(
+                        {
+                            "addr": hex(site),
+                            "mnemonic": "rodata_vicinity",
+                            "op_str": hex(v),
+                            "nearby_fn": _nearby_fn(img, site),
+                            "kind": "vicinity",
+                            "target_ref": hex(v),
+                        }
+                    )
+                    if len(out) >= max_hits:
+                        return out
     return out
 
 
@@ -350,7 +355,6 @@ def find_string_xrefs_multi(
                         break
                     # avoid matching inside unrelated data: prefer insn-aligned-ish
                     addr = sec.addr + idx
-                    # walk back up to 15 bytes to find a disassembled insn that uses this imm
                     hit_addr = addr
                     want[t].append(
                         {
@@ -368,9 +372,92 @@ def find_string_xrefs_multi(
         return want
 
     mode = cs.CS_MODE_64 if img.bits == 64 else cs.CS_MODE_32
-    md = cs.Cs(cs.CS_ARCH_X86, mode)
-    md.detail = True
+    md_fast = cs.Cs(cs.CS_ARCH_X86, mode)
+    md_fast.detail = False
+    md_detail = cs.Cs(cs.CS_ARCH_X86, mode)
+    md_detail.detail = True
+
+    # Vectorized NumPy fast path for x86_64 RIP-relative displacements (runs in milliseconds)
+    if img.arch == "x86_64":
+        try:
+            import numpy as np
+            has_np = True
+        except ImportError:
+            has_np = False
+
+        if has_np:
+            for sec in img.sections:
+                if not remaining:
+                    break
+                if not sec.executable or not sec.data:
+                    continue
+                data = sec.data
+                base = sec.addr
+
+                for t in list(remaining):
+                    if len(want[t]) >= max_per_target:
+                        remaining.discard(t)
+                        continue
+                    found_sites: List[int] = []
+                    for trailing in (0, 1, 2, 4):
+                        if len(want[t]) >= max_per_target:
+                            break
+                        for shift in range(4):
+                            chunk_len = (len(data) - shift) // 4 * 4
+                            if chunk_len <= 0:
+                                continue
+                            arr = np.frombuffer(data[shift : shift + chunk_len], dtype=np.int32)
+                            offsets = (np.arange(len(arr), dtype=np.int64) * 4 + shift).astype(np.int64)
+                            C = t - base - 4 - trailing
+                            hits = np.flatnonzero((arr.astype(np.int64) + offsets) == C)
+                            for h in hits:
+                                found_sites.append(int(offsets[h]))
+
+                    for disp_off in found_sites:
+                        if len(want[t]) >= max_per_target:
+                            remaining.discard(t)
+                            break
+                        for back in (1, 2, 3, 4):
+                            insn_off = disp_off - back
+                            if insn_off < 0:
+                                continue
+                            insn_va = base + insn_off
+                            win = data[insn_off : min(len(data), insn_off + 15)]
+                            for insn in md_detail.disasm(win, insn_va):
+                                for op in insn.operands:
+                                    if op.type == cs.CS_OP_MEM and op.mem.base == X86_REG_RIP:
+                                        ea = insn.address + insn.size + op.mem.disp
+                                        if ea == t:
+                                            hit_addr = hex(insn.address)
+                                            if not any(b.get("addr") == hit_addr for b in want[t]):
+                                                want[t].append(
+                                                    {
+                                                        "addr": hit_addr,
+                                                        "mnemonic": insn.mnemonic,
+                                                        "op_str": insn.op_str,
+                                                        "nearby_fn": _nearby_fn(img, insn.address),
+                                                        "kind": "rip",
+                                                    }
+                                                )
+                                                if len(want[t]) >= max_per_target:
+                                                    remaining.discard(t)
+                                            break
+                                break
+                            if t not in remaining:
+                                break
+
     remaining = {t for t, bucket in want.items() if len(bucket) < max_per_target}
+    if not remaining or (has_np and img.arch == "x86_64"):
+        # Vicinity fallback
+        for t in list(want.keys()):
+            if len(want[t]) >= max_per_target:
+                continue
+            for xr in find_rodata_vicinity_xrefs(img, t, max_hits=max_per_target - len(want[t])):
+                if any(b.get("addr") == xr.get("addr") for b in want[t]):
+                    continue
+                want[t].append(xr)
+        return want
+
     scanned = 0
     for sec in img.sections:
         if not remaining or scanned >= max_scan_bytes:
@@ -384,14 +471,25 @@ def find_string_xrefs_multi(
             chunk = data[offset : offset + take + 16]
             base = sec.addr + offset
             try:
-                for insn in md.disasm(chunk[:take], base):
+                for insn in md_fast.disasm(chunk[:take], base):
                     if not remaining:
                         break
+                    op_str = insn.op_str or ""
+                    has_rip = "rip" in op_str.lower()
+                    has_imm = "0x" in op_str or any(c.isdigit() for c in op_str)
+                    if not has_rip and not has_imm:
+                        continue
+
+                    # Detailed inspection only for candidate instructions
+                    det_insns = list(md_detail.disasm(insn.bytes, insn.address))
+                    if not det_insns:
+                        continue
+                    d_insn = det_insns[0]
                     hit_t = None
-                    for op in insn.operands:
+                    for op in d_insn.operands:
                         ea = None
                         if op.type == cs.CS_OP_MEM and op.mem.base == X86_REG_RIP:
-                            ea = insn.address + insn.size + op.mem.disp
+                            ea = d_insn.address + d_insn.size + op.mem.disp
                         elif op.type == cs.CS_OP_IMM and op.imm in remaining:
                             ea = int(op.imm)
                         if ea in remaining:
@@ -401,18 +499,18 @@ def find_string_xrefs_multi(
                         continue
                     bucket = want[hit_t]
                     # dedupe near same site
-                    if any(b.get("addr") == hex(insn.address) for b in bucket):
+                    if any(b.get("addr") == hex(d_insn.address) for b in bucket):
                         continue
                     if len(bucket) >= max_per_target:
                         remaining.discard(hit_t)
                         continue
                     bucket.append(
                         {
-                            "addr": hex(insn.address),
-                            "mnemonic": insn.mnemonic,
-                            "op_str": insn.op_str,
-                            "nearby_fn": _nearby_fn(img, insn.address),
-                            "kind": "rip" if "rip" in (insn.op_str or "").lower() else "imm",
+                            "addr": hex(d_insn.address),
+                            "mnemonic": d_insn.mnemonic,
+                            "op_str": d_insn.op_str,
+                            "nearby_fn": _nearby_fn(img, d_insn.address),
+                            "kind": "rip" if has_rip else "imm",
                         }
                     )
                     if len(bucket) >= max_per_target:
@@ -435,6 +533,43 @@ def find_string_xrefs_multi(
 
 def find_string_xrefs(img, target: int, *, max_hits: int = 24) -> List[Dict[str, Any]]:
     return find_string_xrefs_multi(img, [target], max_per_target=max_hits).get(target, [])
+
+
+def _is_safe_boolean_validator(img: Any, ct_val: int) -> bool:
+    """Verify that ct_val is a function returning boolean in eax/al,
+    NOT a jump table, dispatch thunk, or void setup function."""
+    try:
+        from argus.disasm.recovery import function_covering
+        import capstone as cs
+
+        vbound = function_covering(img, ct_val)
+        if not vbound:
+            return False
+        # Must be called at or near the function entry point
+        if abs(ct_val - vbound.start) > 16:
+            return False
+        size = min(vbound.end - ct_val, 4096)
+        if size < 6:
+            return False
+        raw = img.read_bytes(ct_val, size)
+        md = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64 if img.bits == 64 else cs.CS_MODE_32)
+        insns = list(md.disasm(raw, ct_val))
+        if not insns or insns[0].mnemonic == "jmp":
+            return False
+        # Must have a ret reachable from ct_val
+        has_ret = any(i.mnemonic == "ret" for i in insns)
+        if not has_ret:
+            return False
+        # Check if the function sets eax/al (boolean or status return)
+        sets_ret_reg = any(
+            (i.mnemonic.startswith("mov") and ("eax" in i.op_str or "al" in i.op_str))
+            or (i.mnemonic == "xor" and ("eax" in i.op_str or "al" in i.op_str))
+            or (i.mnemonic.startswith("set"))
+            for i in insns
+        )
+        return sets_ret_reg
+    except Exception:
+        return False
 
 
 def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str, Any]]:
@@ -503,6 +638,22 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
         if not near:
             continue
         if m.startswith("j") and m not in ("jmp", "jecxz", "jrcxz"):
+            # Filter out destructor cleanup branches jumping straight to ret/epilogue
+            try:
+                target_addr = int(insn.op_str, 16)
+                is_cleanup = False
+                for t_idx in range(n + 1, min(len(insns), n + 8)):
+                    if insns[t_idx].address == target_addr:
+                        if insns[t_idx].mnemonic in ("ret", "nop", "add", "pop"):
+                            skipped = [insns[x].mnemonic for x in range(n + 1, t_idx)]
+                            if any("call" in sm for sm in skipped) and len(skipped) <= 3:
+                                is_cleanup = True
+                        break
+                if is_cleanup:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
             ui_only = True
             ret_guess = 1
             reason = f"conditional near string xref@{hex(xref_addr)}"
@@ -596,12 +747,104 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
                     "call_target": _call_target(insn),
                 }
             )
+    # Caller Walking: If this function is a leaf/dialog/formatter, find who calls/references it
+    try:
+        from argus.disasm.recovery import function_covering
+
+        bound = function_covering(img, xref_addr)
+        if bound and bound.start:
+            caller_xrefs = find_string_xrefs_multi(img, [bound.start]).get(bound.start, [])
+            for cx in caller_xrefs[:6]:
+                ca = int(cx.get("addr") or "0", 16)
+                if not ca or ca == xref_addr:
+                    continue
+                cbound = function_covering(img, ca)
+                if cbound and cbound.start:
+                    c_start = cbound.start
+                    c_len = min(max(cbound.end - cbound.start, 64), 0x2000)
+                else:
+                    c_start = max(0, ca - 128)
+                    c_len = 160
+                c_data = img.read_bytes(c_start, c_len)
+                if not c_data:
+                    continue
+                c_insns = list(md.disasm(c_data, c_start))
+                for ci, c_insn in enumerate(c_insns):
+                    if c_insn.address > ca + 8:
+                        continue
+                    cm = c_insn.mnemonic
+                    if cm.startswith("j") and cm not in ("jmp", "jecxz", "jrcxz"):
+                        target_addr = None
+                        try:
+                            target_addr = int(c_insn.op_str, 16)
+                        except (ValueError, TypeError):
+                            pass
+
+                        # Determine if jump bypasses the error call @ ca or jumps into it
+                        if target_addr and target_addr > ca:
+                            taken = True
+                        elif target_addr and target_addr <= ca:
+                            taken = False
+                        elif cm in ("jne", "jnz"):
+                            taken = True
+                        else:
+                            taken = False
+
+                        val_call = None
+                        for b in range(ci - 1, max(-1, ci - 9), -1):
+                            if c_insns[b].mnemonic == "call":
+                                ct_val = _call_target(c_insns[b])
+                                if ct_val:
+                                    vbound = function_covering(img, ct_val)
+                                    vsz = (vbound.end - vbound.start) if vbound else 0
+                                    nc = count_function_callers(img, ct_val)
+                                    if 3 <= nc <= 200 and vsz >= 0x80 and _is_safe_boolean_validator(img, ct_val):
+                                        val_call = (ct_val, nc, vsz)
+                                        break
+
+                        score = 220
+                        why = f"caller gate: skips error/dialog call@{hex(ca)} (taken={taken})"
+                        if val_call:
+                            score += 40
+                            why += f" after validator hub@{hex(val_call[0])} (in-degree={val_call[1]})"
+
+                        cands.append(
+                            {
+                                "kind": "force_branch",
+                                "addr": hex(c_insn.address),
+                                "mnemonic": f"{cm} {c_insn.op_str}",
+                                "taken": taken,
+                                "reason": why,
+                                "nearby_fn": _nearby_fn(img, c_insn.address),
+                                "score": score,
+                                "ui_label_only": False,
+                                "ret_guess": 1,
+                            }
+                        )
+
+                        if val_call:
+                            hub_score = 350 + min(val_call[1] * 5, 100)
+                            cands.append(
+                                {
+                                    "kind": "ret_imm",
+                                    "addr": hex(val_call[0]),
+                                    "reason": f"primary validator hub (in-degree={val_call[1]}, size={val_call[2]}B) called before gate@{hex(c_insn.address)}",
+                                    "nearby_fn": _nearby_fn(img, val_call[0]),
+                                    "score": hub_score,
+                                    "ui_label_only": False,
+                                    "ret_guess": 1,
+                                    "value": 1,
+                                }
+                            )
+    except Exception:
+        pass
+
     enriched = []
     for c in cands:
+        addr_int = int(c.get("addr") or "0", 16)
         if c.get("kind") == "ret_imm" and c.get("call_target"):
             ct = c["call_target"]
             boost = 10
-            # Prefer stubbing large validators over tiny string parsers
             try:
                 from argus.disasm.recovery import function_covering
 
@@ -611,7 +854,10 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
                     if sz >= 0x400:
                         boost = 55
                     elif sz < 0x80:
-                        boost = -30  # likely parser/helper, not the gate
+                        boost = -30
+                nc = count_function_callers(img, ct)
+                if 3 <= nc <= 200:
+                    boost += 50
             except Exception:
                 pass
             enriched.append(
@@ -620,9 +866,16 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
                     "addr": hex(ct),
                     "reason": c["reason"] + f" → stub callee@{hex(ct)}",
                     "score": int(c["score"]) + boost,
+                    "asm_preview": generate_asm_preview(img, ct),
                 }
             )
-        enriched.append(c)
+        else:
+            enriched.append(
+                {
+                    **c,
+                    "asm_preview": generate_asm_preview(img, addr_int) if addr_int else "",
+                }
+            )
 
     enriched.sort(key=lambda x: -int(x.get("score") or 0))
     seen = set()
@@ -633,22 +886,91 @@ def suggest_patches_near(img, xref_addr: int, window: int = 96) -> List[Dict[str
             continue
         seen.add(key)
         out.append(c)
-        if len(out) >= 10:
+        if len(out) >= 12:
             break
     return out
+
+
+def count_function_callers(img, func_va: int) -> int:
+    """Count direct rel32 calls/jmps to func_va in .text section."""
+    sec = None
+    for s in getattr(img, "sections", []):
+        if getattr(s, "name", "") in (".text", "code", "text"):
+            sec = s
+            break
+    if not sec or not getattr(sec, "data", None):
+        return 0
+    try:
+        import numpy as np
+
+        data = sec.data
+        base = sec.addr
+        count = 0
+        C = func_va - base - 4
+        for shift in range(4):
+            chunk_len = (len(data) - shift) // 4 * 4
+            arr = np.frombuffer(data[shift : shift + chunk_len], dtype=np.int32)
+            offsets = (np.arange(len(arr), dtype=np.int64) * 4 + shift).astype(np.int64)
+            hits = np.flatnonzero(arr.astype(np.int64) + offsets == C)
+            for h in hits:
+                idx = int(offsets[h])
+                if idx > 0 and data[idx - 1] in (0xE8, 0xE9):
+                    count += 1
+        return count
+    except Exception:
+        return 0
+
+
+def generate_asm_preview(img, target_addr: int, count_before: int = 3, count_after: int = 4) -> str:
+    """Disassemble a clean annotated instruction snippet around target_addr."""
+    if not target_addr:
+        return ""
+    try:
+        import capstone as cs
+
+        mode = cs.CS_MODE_64 if getattr(img, "bits", 64) == 64 else cs.CS_MODE_32
+        md = cs.Cs(cs.CS_ARCH_X86, mode)
+        start = max(0, target_addr - 36)
+        data = img.read_bytes(start, 80)
+        if not data:
+            return ""
+        insns = list(md.disasm(data, start))
+        target_idx = None
+        for idx, insn in enumerate(insns):
+            if insn.address == target_addr:
+                target_idx = idx
+                break
+        if target_idx is None:
+            return ""
+        lo = max(0, target_idx - count_before)
+        hi = min(len(insns), target_idx + count_after + 1)
+        lines = []
+        for insn in insns[lo:hi]:
+            tag = "  <-- GATE" if insn.address == target_addr else ""
+            lines.append(f"0x{insn.address:x}: {insn.mnemonic:8} {insn.op_str}{tag}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 def _call_target(insn) -> Optional[int]:
     try:
         import capstone as cs
 
-        if not insn.operands:
-            return None
-        op = insn.operands[0]
-        if op.type == cs.CS_OP_IMM:
-            return int(op.imm)
+        if getattr(insn, "operands", None):
+            op = insn.operands[0]
+            if op.type == cs.CS_OP_IMM:
+                return int(op.imm)
     except Exception:
-        return None
+        pass
+    try:
+        op_str = getattr(insn, "op_str", "") or ""
+        if op_str.startswith("0x"):
+            return int(op_str, 16)
+        if op_str.isdigit():
+            return int(op_str)
+    except Exception:
+        pass
     return None
 
 
@@ -710,15 +1032,48 @@ def find_in_binary(
 ) -> Dict[str, Any]:
     """Search symbols/strings; rank phrases; optionally attach xrefs + patch hints."""
     img = load_binary(path)
+    q = (query or "").strip()
+    if not q:
+        from argus.flow import discover_reject_ui_strings
+
+        candidates = discover_reject_ui_strings(img, limit=12)
+        return {
+            "ok": True,
+            "summary": f"find: no query= — reject_ui_candidates={len(candidates)}",
+            "observations": [
+                "query= required for targeted string/symbol search",
+                f"reject_ui_candidates={len(candidates)}",
+            ],
+            "evidence": {
+                "hits": [],
+                "reject_ui_candidates": candidates,
+                "query": "",
+                "fmt": img.fmt,
+                "entry": hex(img.entry),
+            },
+            "hints": {
+                "reject_ui_candidates": candidates,
+                "suggested_tools": [
+                    {"tool": "argus_find", "reason": "pass query= from user task", "confidence": 0.9},
+                    {"tool": "argus_xrefs", "reason": "after find hit", "confidence": 0.5},
+                ],
+            },
+            "hits": [],
+            "limits": {"limit": limit, "returned": 0},
+            "next_hint": (
+                "no query=: pass query= from user task or pick needle from reject_ui_candidates"
+            ),
+        }
+
     keywords = list(DEFAULT_KEYWORDS)
     if query:
         # keep multi-word phrases from query intact
         q = query.strip()
-        if len(q) >= 4:
+        if len(q) >= 3:
             keywords.insert(0, q.lower())
         for tok in re.split(r"[\s,;/|]+", q):
             t = tok.strip().lower()
-            if len(t) >= 4 and t not in keywords:
+            if len(t) >= 3 and t not in keywords:
                 keywords.insert(0, t)
 
     scored: List[Tuple[int, Dict[str, Any]]] = []
@@ -741,12 +1096,19 @@ def find_in_binary(
         }
         scored.append((hit["score"], hit))
 
+    if not keywords:
+        for name, sym in img.symbols.items():
+            if sym.is_function and not sym.is_import and sym.addr:
+                add(sym.addr, "symbol", name, "symbol")
+                if len(scored) >= limit * 2:
+                    break
+
     for name, sym in img.symbols.items():
         if not sym.addr or sym.is_import:
             continue
         low = name.lower()
         for kw in keywords:
-            if len(kw) >= 5 and kw in low:
+            if len(kw) >= 3 and kw in low:
                 add(sym.addr, "symbol", name, kw)
                 break
 
@@ -799,17 +1161,12 @@ def find_in_binary(
         gate_candidates = rank_gate_candidates(img, top, limit=12)
         patch_candidates = list(gate_candidates)
 
-    # On stripped / license-ish queries, merge universal gate_scan gates
-    qlow = (query or "").lower()
-    license_ish = any(
-        k in qlow
-        for k in ("license", "unlock", "register", "activat", "trial", "unregistered")
-    )
-    if with_xrefs and (stripped or license_ish):
+    # On stripped binaries or explicit query, merge universal gate_scan gates
+    if with_xrefs and (stripped or query):
         try:
             from argus.find_slice import gate_scan
 
-            sliced = gate_scan(path, query if license_ish else "invalid license", limit=12)
+            sliced = gate_scan(path, query, limit=12)
             seen_g = {(g.get("kind"), g.get("addr")) for g in gate_candidates}
             for g in sliced.get("gate_candidates") or []:
                 key = (g.get("kind"), g.get("addr"))

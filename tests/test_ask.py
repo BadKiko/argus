@@ -50,9 +50,12 @@ def test_ask_lift_authenticate():
     assert "L_" in r.readable or "block_" in r.readable
 
 
-def test_ask_patch_always_true():
+def test_ask_patch_always_true(tmp_path):
+    import shutil
+    import sys
+
     src = str(_need("fauxware"))
-    out = "/tmp/argus_always_true.bin"
+    out = str(tmp_path / "argus_always_true.bin")
     r = ask(
         src,
         Hint(
@@ -65,12 +68,26 @@ def test_ask_patch_always_true():
     )
     assert r.ok and r.patched_path
     # any password should welcome now (authenticate always returns 1)
-    p = subprocess.run([out], input=b"nope\nnope\n", capture_output=True)
-    assert b"Welcome" in p.stdout
+    if sys.platform == "win32":
+        has_wsl = False
+        if shutil.which("wsl"):
+            try:
+                res = subprocess.run(["wsl", "--status"], capture_output=True, timeout=1.0)
+                has_wsl = (res.returncode == 0)
+            except Exception:
+                pass
+        if has_wsl:
+            drive = out[0].lower()
+            wsl_path = f"/mnt/{drive}/" + out[3:].replace("\\", "/")
+            p = subprocess.run(["wsl", wsl_path], input=b"nope\nnope\n", capture_output=True)
+            assert b"Welcome" in p.stdout
+    else:
+        p = subprocess.run([out], input=b"nope\nnope\n", capture_output=True)
+        assert b"Welcome" in p.stdout
 
 
-def test_ask_deobf():
-    out = "/tmp/argus_ask_deobf.bin"
+def test_ask_deobf(tmp_path):
+    out = str(tmp_path / "argus_ask_deobf.bin")
     r = ask(
         str(_need("fauxware_fla")),
         Hint(want=Want.DEOBF, function="authenticate", output=out, note="unflatten"),

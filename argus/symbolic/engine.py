@@ -79,6 +79,8 @@ class Engine:
         stdin: List[Value]
         if concrete_stdin is not None:
             stdin = list(concrete_stdin)
+            while len(stdin) < stdin_len:
+                stdin.append(z3.BitVec(f"stdin_{len(stdin)}", 8))
         else:
             stdin = [z3.BitVec(f"stdin_{i}", 8) for i in range(stdin_len)]
 

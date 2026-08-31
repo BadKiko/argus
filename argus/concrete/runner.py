@@ -145,6 +145,45 @@ class UnicornRunner:
                         break
             _ret(mu_)
 
+        def hook_strlen(mu_):
+            ptr = read_reg(UC_X86_REG_RDI)
+            n = 0
+            while n < 4096:
+                if mu_.mem_read(ptr + n, 1)[0] == 0:
+                    break
+                n += 1
+            write_reg(UC_X86_REG_RAX, n)
+            _ret(mu_)
+
+        def hook_memcmp(mu_):
+            a = read_reg(UC_X86_REG_RDI)
+            b = read_reg(UC_X86_REG_RSI)
+            n = read_reg(UC_X86_REG_RDX)
+            diff = 0
+            for i in range(min(n, 256)):
+                x = mu_.mem_read(a + i, 1)[0]
+                y = mu_.mem_read(b + i, 1)[0]
+                if x != y:
+                    diff = x - y
+                    break
+            write_reg(UC_X86_REG_RAX, diff & 0xFFFFFFFF)
+            _ret(mu_)
+
+        def hook_fgets(mu_):
+            buf = read_reg(UC_X86_REG_RDI)
+            size = read_reg(UC_X86_REG_RSI)
+            stream = read_reg(UC_X86_REG_RDX)
+            _ = stream
+            take = min(size - 1, len(stdin_buf) - stdin_pos[0]) if size > 1 else 0
+            if take > 0:
+                chunk = bytes(stdin_buf[stdin_pos[0] : stdin_pos[0] + take])
+                mu_.mem_write(buf, chunk + b"\x00")
+                stdin_pos[0] += take
+                write_reg(UC_X86_REG_RAX, buf)
+            else:
+                write_reg(UC_X86_REG_RAX, 0)
+            _ret(mu_)
+
         def hook_exit(mu_):
             code = read_reg(UC_X86_REG_RDI) & 0xFF
             mu_.emu_stop()
@@ -160,7 +199,10 @@ class UnicornRunner:
             "puts": hook_puts,
             "printf": hook_printf,
             "read": hook_read,
+            "fgets": hook_fgets,
             "strcmp": hook_strcmp,
+            "strlen": hook_strlen,
+            "memcmp": hook_memcmp,
             "exit": hook_exit,
             "__libc_start_main": None,
         }

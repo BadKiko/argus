@@ -7,20 +7,26 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 from typing import Any, Dict, List, Optional, TextIO
 
 _PREVIEW = 8000
 _DISABLED = frozenset({"0", "false", "no", "off", "none"})
-_TMP_LINK = Path("/tmp/argus.jsonl")
+_TMP_LINK = Path(tempfile.gettempdir()) / "argus.jsonl"
+
+
+def _home_dir() -> Path:
+    h = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    return Path(h) if h else Path.home()
 
 
 def default_log_path() -> Path:
-    return Path.home() / ".cache" / "argus" / "current.jsonl"
+    return _home_dir() / ".cache" / "argus" / "current.jsonl"
 
 
 def default_archive_path() -> Path:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path.home() / ".cache" / "argus" / "sessions" / f"{ts}.jsonl"
+    return _home_dir() / ".cache" / "argus" / "sessions" / f"{ts}.jsonl"
 
 
 def tail_log_hint() -> str:
@@ -181,6 +187,14 @@ class AgentTranscript:
             "result_preview": preview,
             "result_len": len(result),
         }
+        try:
+            from argus.llm.tool_result import digest_tool_result
+
+            digest = digest_tool_result(result)
+            if digest:
+                rec["evidence_digest"] = digest
+        except Exception:
+            pass
         if injected_binary is not None:
             rec["injected_binary"] = injected_binary
         self._emit(rec)
