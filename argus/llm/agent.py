@@ -176,14 +176,6 @@ def _build_user_content(
     if tasks_block:
         parts.append("")
         parts.append(tasks_block)
-    try:
-        from argus.llm.intent import format_task_signals
-
-        sig_line = format_task_signals(user_prompt, binary=binary, discover=discover)
-        parts.append("")
-        parts.append(sig_line)
-    except Exception:
-        pass
     if memory_hints:
         parts.append("")
         parts.append(memory_hints)
@@ -223,67 +215,6 @@ def _build_user_content(
 
 def _system_for_model(model: Optional[str]) -> str:
     return SYSTEM
-
-
-def _bootstrap_prefix(
-    binary: Optional[str],
-    user_prompt: str,
-    *,
-    discover: Optional[dict] = None,
-    original_binary: Optional[str] = None,
-    tasks=None,
-) -> str:
-    if not binary:
-        return ""
-    try:
-        from argus.llm.autopilot import bootstrap_evidence
-
-        boot = bootstrap_evidence(
-            binary,
-            user_prompt,
-            discover=discover,
-            original_binary=original_binary,
-        )
-        return boot.get("brief") or ""
-    except Exception:
-        return ""
-
-
-def _recovery_hints_from_trace(
-    trace: List[Dict[str, Any]],
-    *,
-    binary: Optional[str],
-    user_prompt: str,
-    discover: Optional[dict],
-) -> Optional[str]:
-    """Hints only — LLM chooses tools; no auto-dispatch."""
-    if not binary:
-        return None
-    from argus.llm.autopilot import recovery_hints_from_trace
-
-    text = recovery_hints_from_trace(
-        trace,
-        binary=binary,
-        user_prompt=user_prompt,
-        discover=discover,
-    )
-    return text or None
-
-
-def _maybe_auto_pivot(
-    trace: List[Dict[str, Any]],
-    *,
-    binary: Optional[str],
-    user_prompt: str,
-    discover: Optional[dict],
-    verbose: bool,
-) -> Optional[str]:
-    return _recovery_hints_from_trace(
-        trace,
-        binary=binary,
-        user_prompt=user_prompt,
-        discover=discover,
-    )
 
 
 def _fast_path_enabled() -> bool:
@@ -676,9 +607,8 @@ def _run_openai(
         verbose=verbose,
     )
     trace: List[Dict[str, Any]] = []
-    bootstrap = ""
     if fp:
-        trace, bootstrap, fp_done = fp
+        trace, _, fp_done = fp
         if fp_done:
             res = finalize_agent(
                 tasks,
@@ -695,19 +625,9 @@ def _run_openai(
             )
             res.binary = original_binary or binary
             return res
-    if not bootstrap:
-        bootstrap = _bootstrap_prefix(
-            binary,
-            user_prompt,
-            discover=discover,
-            original_binary=original_binary,
-            tasks=tasks,
-        )
     content = _build_user_content(
         user_prompt, binary, tasks_block, discover=discover, memory_hints=memory_hints
     )
-    if bootstrap:
-        content = bootstrap + "\n\n" + content
     if transcript is not None:
         transcript.initial_prompt(content)
     messages: List[Dict[str, Any]] = [
@@ -827,19 +747,7 @@ def _run_openai(
 
         hint = open_tasks_hint(tasks, trace)
         if _patch_loop_detected(trace):
-            hint += (
-                "\nPatch loop — same addresses retried. PIVOT: argus_research / "
-                "different gate or argus_slice+apply_plan; do NOT stop."
-            )
-        pivot_hint = _maybe_auto_pivot(
-            trace,
-            binary=binary,
-            user_prompt=user_prompt,
-            discover=discover,
-            verbose=verbose,
-        )
-        if pivot_hint:
-            hint += "\n" + pivot_hint
+            hint += "\nNote: repeated patch on same address(es) in recent steps."
         if transcript is not None:
             transcript.user_message(step, hint, kind="open_tasks_hint")
         messages.append({"role": "user", "content": hint})
@@ -895,9 +803,8 @@ def _run_gemini(
             verbose=verbose,
         )
         trace: List[Dict[str, Any]] = []
-        bootstrap = ""
         if fp:
-            trace, bootstrap, fp_done = fp
+            trace, _, fp_done = fp
             if fp_done:
                 res = finalize_agent(
                     tasks,
@@ -914,19 +821,9 @@ def _run_gemini(
                 )
                 res.binary = original_binary or binary
                 return res
-        if not bootstrap:
-            bootstrap = _bootstrap_prefix(
-                binary,
-                user_prompt,
-                discover=discover,
-                original_binary=original_binary,
-                tasks=tasks,
-            )
         text = _build_user_content(
             user_prompt, binary, tasks_block, discover=discover, memory_hints=memory_hints
         )
-        if bootstrap:
-            text = bootstrap + "\n\n" + text
         if transcript is not None:
             transcript.initial_prompt(text)
         contents: List[Dict[str, Any]] = [{"role": "user", "parts": [{"text": text}]}]
@@ -1050,19 +947,7 @@ def _run_gemini(
             contents.append({"role": "user", "parts": fr_parts})
             hint = open_tasks_hint(tasks, trace)
             if _patch_loop_detected(trace):
-                hint += (
-                    "\nPatch loop — same addresses retried. PIVOT: argus_research / "
-                    "different gate or argus_slice+apply_plan; do NOT stop."
-                )
-            pivot_hint = _maybe_auto_pivot(
-                trace,
-                binary=binary,
-                user_prompt=user_prompt,
-                discover=discover,
-                verbose=verbose,
-            )
-            if pivot_hint:
-                hint += "\n" + pivot_hint
+                hint += "\nNote: repeated patch on same address(es) in recent steps."
             if transcript is not None:
                 transcript.user_message(step, hint, kind="open_tasks_hint")
             contents.append({"role": "user", "parts": [{"text": hint}]})

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from argus.llm.agent import _fast_path_enabled, _recovery_hints_from_trace
-from argus.llm.autopilot import bootstrap_evidence, extract_failure_context
+from argus.llm.agent import _fast_path_enabled
+from argus.llm.autopilot import bootstrap_evidence, extract_failure_context, recovery_hints_from_trace
 from argus.llm.tools import dispatch_tool
 from argus.llm.session import reset_session
 from argus.apply_plan import apply_plan
@@ -64,8 +64,8 @@ def test_extract_failure_no_license_fallback():
     assert ctx.get("error_text") != "License"
 
 
-def test_recovery_hints_no_dispatch():
-    hints = _recovery_hints_from_trace(
+def test_recovery_hints_no_license_fallback():
+    hints = recovery_hints_from_trace(
         [{"tool": "argus_apply_plan", "result": {"ok": False, "summary": "failed"}}],
         binary=str(FAUXWARE) if FAUXWARE.is_file() else "x.exe",
         user_prompt="test",

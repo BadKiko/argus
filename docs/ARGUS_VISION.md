@@ -35,8 +35,6 @@ Legacy names removed. Use neutral vocabulary:
 | `argus_apply_plan` | `argus_apply_plan` |
 | `signal_score` | `signal_score` |
 
-See [PLAN_0.2.0.md](../PLAN_0.2.0.md) naming refactor section.
-
 ## Memory
 
 Structured case memory: successes **and** failures, strategy scoring, RAG hints (not ground truth).
@@ -49,17 +47,12 @@ Structured case memory: successes **and** failures, strategy scoring, RAG hints 
 
 > Don't teach the AI every binary. Teach it how to investigate, remember, choose the next experiment, transform, and prove correctness.
 
-## Argus 0.5 — LLM plans, tools observe
-
-From **0.5.0**, the agent path follows:
+## Agent (0.5+)
 
 ```
-User task → LLM (only planner) → atomic tools → evidence + hints → LLM next step → verify → memory
+User task → LLM → atomic tools → structured tool JSON → verify → memory
 ```
 
-- **Fast-path / autopilot** is **opt-in** (`ARGUS_FAST_PATH=1` or `argus debug fast-path`) — not the default agent.
-- Tools return **observations + ranked hints**; hints are never auto-executed.
-- `apply_plan` and `diagnose_failure` require explicit parameters from the model (no silent auto-slice, no `"License"` fallback).
-- Case memory stores **tool sequences** and `planner=llm` vs `fast_path_legacy`.
-
-See [PLAN_0.5.0.md](../PLAN_0.5.0.md) and `.cursor/rules/no-autopilot.mdc`.
+- LLM chooses tools and parameters; Python executes and verifies.
+- Task `done` comes from tool evidence + verify, not model prose.
+- Optional legacy fast-path: `ARGUS_FAST_PATH=1` (not default).

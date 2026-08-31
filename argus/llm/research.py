@@ -89,13 +89,6 @@ def build_research_brief(
     elif binary:
         lines.append(f"Binary: {binary}")
 
-    try:
-        from argus.llm.intent import format_task_signals
-
-        lines.append(format_task_signals(user_prompt, binary=original_binary or binary, discover=discover))
-    except Exception:
-        pass
-
     lines.append("")
     lines.append("Open tasks:")
     for s in open_tasks:

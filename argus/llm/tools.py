@@ -32,16 +32,6 @@ def openai_tool(name: str, description: str, properties: dict, required: Optiona
 
 ARGUS_TOOLS: List[dict] = [
     openai_tool(
-        "argus_next_step",
-        "Return ranked tool suggestions from current session/trace (hints only — you still choose and call tools). "
-        "Always pass for_task.",
-        {
-            "binary": {"type": "string", "description": "Work copy path"},
-            "task": {"type": "string", "description": "Current task text"},
-        },
-        ["binary"],
-    ),
-    openai_tool(
         "argus_investigate",
         "Investigation-first: analyze + find + gate_scan + xrefs in one call. "
         "Returns observations[], hypotheses[], suggested_next_tool. "
@@ -722,42 +712,10 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
 def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
     """Execute one Argus tool; return JSON/text for the model."""
     # Discover and exec may run without a known binary; everything else needs a file on disk
-    if name.startswith("argus_") and name not in ("argus_discover", "argus_exec", "argus_next_step"):
+    if name.startswith("argus_") and name not in ("argus_discover", "argus_exec"):
         err = _require_binary(arguments)
         if err is not None:
             return err
-
-    if name == "argus_next_step":
-        from argus.llm.autopilot import recovery_hints_from_trace
-        from argus.llm.investigate import rank_tool_suggestions
-        from argus.llm.intent import classify_task_intent
-        from argus.llm.session import get_session
-
-        sess = get_session()
-        trace = list(sess.tool_trace)
-        task_text = arguments.get("task") or ""
-        binary = arguments["binary"]
-        inv = sess.last_investigate or {}
-        plan = list((inv.get("slice") or {}).get("patch_plan") or [])
-        intent = classify_task_intent(task_text, binary=binary)
-        tried = [e.get("tool") for e in trace if e.get("tool")]
-        ranked = rank_tool_suggestions(
-            intent=intent,
-            analyze_ok=True,
-            find_ok=True,
-            slice_data={"patch_plan": plan},
-            tools_tried=tried,
-        )
-        recovery = recovery_hints_from_trace(
-            trace, binary=binary, user_prompt=task_text, discover=None
-        )
-        return _envelope(
-            ok=True,
-            summary=f"ranked {len(ranked)} tool hints (hints only — you dispatch tools)",
-            evidence={"recovery_hints": recovery},
-            hints={"suggested_tools": ranked},
-            observations=[recovery] if recovery else [],
-        )
 
     if name == "argus_investigate":
         from argus.llm.investigate import run_investigate

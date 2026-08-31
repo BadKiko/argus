@@ -16,7 +16,5 @@ samples/*.patched
 samples/.argus-work/
 .cache/
 
-# cursor: commit shared rules, ignore local IDE state
-.cursor/*
-!.cursor/rules/
-!.cursor/rules/**
+# cursor IDE local state (not part of the product)
+.cursor/

@@ -195,70 +195,12 @@ def open_tasks_hint(tasks: List[UserTask], tool_trace: List[Dict[str, Any]]) -> 
     statuses = _evaluate_tasks(tasks, tool_trace, binary=binary)
     open_ids = [s.task.id for s in statuses if s.status != "done"]
     if not open_ids:
-        task_text = tasks[0].text if tasks else ""
-        try:
-            from argus.llm.verification_hints import verification_gap_hint
+        return "All tasks have tool evidence; runtime will finalize status."
 
-            vgap = verification_gap_hint(tool_trace, task_text)
-            if vgap:
-                return (
-                    "TASK STATUS: runtime would finalize, but verification_gap remains:\n"
-                    + vgap
-                    + "\nDo NOT stop — apply remaining corrective_patch / cover error sinks."
-                )
-        except Exception:
-            pass
-        return "All TASKS have tool evidence marked done. Stop and let runtime finalize."
-
-    lines: List[str] = [
-        f"TASK STATUS: open={open_ids}",
-    ]
+    lines: List[str] = [f"Open tasks: {open_ids}"]
     for s in statuses:
         if s.status != "done":
-            lines.append(f"  task {s.task.id}: {s.status} — {s.detail}")
-
-    last_failure = None
-    for entry in reversed(tool_trace[-5:]):
-        res = _parse_result(entry)
-        if res.get("ok") is False:
-            last_failure = entry
-            break
-    if last_failure:
-        f_res = _parse_result(last_failure)
-        lines.append(
-            f"last_failure: tool={last_failure.get('tool')} "
-            f"summary={str(f_res.get('summary') or '')[:120]}"
-        )
-        verify = f_res.get("verify") or {}
-        if verify:
-            lines.append(
-                f"verify: kind={verify.get('kind')} ok={verify.get('ok')} "
-                f"detail={str(verify.get('detail') or '')[:80]}"
-            )
-
-    slice_len = _max_slice_plan_len(tool_trace)
-    lines.append(f"evidence: max_slice_plan_len={slice_len} tool_calls={len(tool_trace)}")
-
-    try:
-        from argus.llm.autopilot import recovery_hints_from_trace
-        from argus.llm.session import investigation_hint
-        from argus.llm.verification_hints import verification_gap_hint
-
-        task_text = tasks[0].text if tasks else ""
-        rec = recovery_hints_from_trace(
-            tool_trace, binary=binary or "", user_prompt=task_text, discover=None
-        )
-        if rec:
-            lines.append(rec)
-        inv = investigation_hint()
-        if inv:
-            lines.append(inv)
-        vgap = verification_gap_hint(tool_trace, task_text)
-        if vgap:
-            lines.append(vgap)
-    except Exception:
-        pass
-
+            lines.append(f"  {s.task.id}: {s.status} — {s.detail}")
     return "\n".join(lines)
 
 

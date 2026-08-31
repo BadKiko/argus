@@ -144,18 +144,16 @@ Backend deploy: [argus-backend/README.md](argus-backend/README.md).
 
 ---
 
-## Agent contract (0.4)
-
-Before the first LLM step, Argus runs a **deterministic bootstrap** (`investigate` + optional `decision_flow`) and injects `BOOTSTRAP REPORT` + `NEXT_ACTION` into the prompt. Weak models (`gemini-*-flash-lite`, `ARGUS_WEAK_MODEL=1`) get a short SYSTEM prompt.
+## Agent contract
 
 | Rule | Behavior |
 |------|----------|
-| Gate transform done | `argus_slice` plan + `argus_apply_plan` with `verify.ok` and positive behavior oracle |
-| Freestyle patch | Never closes gate tasks |
-| `argus_exec` | Python-only by default; scripts in workspace `.argus-exec` |
-| Verify levels | `BYTES` → `EXECUTION` → `BEHAVIOR` → `FORMAL` (smoke ≠ formal) |
+| Task done | Tool evidence + `verify.ok` (runtime finalize) |
+| Patches | Work copy only; never the original binary |
+| Gate transforms | `argus_apply_plan` with explicit `steps=` from slice/diagnose evidence |
+| Verify levels | `BYTES` → `EXECUTION` → `BEHAVIOR` → `FORMAL` |
 
-See [PLAN_0.5.0.md](PLAN_0.5.0.md) (agent: LLM plans, tools observe).
+Optional: `ARGUS_FAST_PATH=1` for legacy deterministic gate pipeline (not default).
 
 ---
 
