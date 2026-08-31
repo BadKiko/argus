@@ -573,8 +573,12 @@ def apply_plan(
         slice_info = gate_scan_modules(path, modules=modules, query=query)
     elif auto_slice:
         slice_info = gate_scan(path, query)
-    from argus.llm.session import get_verified_plan_steps
-    slice_plan = list(slice_info.get("patch_plan") or []) + get_verified_plan_steps()
+    from argus.llm.session import get_verified_plan_steps, get_session
+    slice_plan = list(slice_info.get("patch_plan") or [])
+    sess = get_session()
+    if sess.last_slice_patch_plan:
+        slice_plan = list(sess.last_slice_patch_plan) + slice_plan
+    slice_plan = slice_plan + get_verified_plan_steps()
 
     if explicit_steps:
         if strict_plan_enabled() and not _steps_subset_of_plan(plan, slice_plan, path):

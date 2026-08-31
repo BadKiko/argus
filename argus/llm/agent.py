@@ -24,7 +24,7 @@ Cognitive model (examples, not a fixed pipeline):
 Rules:
 - MUST use tools; never invent results or addresses.
 - Address EVERY task; bind EVERY tool call with for_task=<id>.
-- argus_apply_plan REQUIRES explicit steps= copied from slice, diagnose_failure, or decision_flow evidence.
+- argus_apply_plan: after argus_slice, omit steps= to apply cached patch_plan (batch size ARGUS_APPLY_BATCH, default 1). Or pass steps= from diagnose/decision_flow.
 - argus_diagnose_failure REQUIRES error_text= or crash_code= — never guess needles like "License".
 - Start with observe tools (find, xrefs, disasm, investigate) when the task is open-ended (color, behavior, UI, gates).
 - Verification tiers: EXECUTION_VERIFIED (process launches, no crash) < BEHAVIOR_VERIFIED (check/input outcome actually changed). Launch oracle never supplies validation input — idle UI without reject_text is NOT proof the check accepts arbitrary input.
@@ -129,7 +129,7 @@ def _maybe_finalize_or_research(
 ) -> Tuple[Optional["AgentResult"], Optional[str]]:
     """Return (AgentResult, None) to stop, or (None, research_brief) to continue."""
     from argus.llm.research import build_research_brief, tasks_all_done
-    from argus.llm.session import get_session
+    from argus.llm.session import get_session, max_research_rounds
     from argus.llm.tasks import finalize_agent
 
     mem_binary = original_binary or binary
@@ -152,6 +152,22 @@ def _maybe_finalize_or_research(
 
     sess = get_session()
     sess.research_round += 1
+    if sess.research_round > max_research_rounds():
+        return (
+            finalize_agent(
+                tasks,
+                trace,
+                f"stopped after {sess.research_round - 1} research rounds — model not completing verify chain",
+                steps=step,
+                provider=provider,
+                raw_messages=raw_messages,
+                binary=mem_binary,
+                user_prompt=user_prompt,
+                discover=discover,
+                store_memory=store_memory,
+            ),
+            None,
+        )
     brief = build_research_brief(
         user_prompt,
         tasks,

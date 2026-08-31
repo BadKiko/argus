@@ -56,3 +56,20 @@ User task → LLM → atomic tools → structured tool JSON → verify → memor
 - LLM chooses tools and parameters; Python executes and verifies.
 - Task `done` comes from tool evidence + verify, not model prose.
 - Optional legacy fast-path: `ARGUS_FAST_PATH=1` (not default).
+
+### Context within one run
+
+Each `argus agent` invocation is **one conversation**: the LLM keeps full message history for all tool steps. Session cache holds the last `patch_plan`, gate scan, and tool trace — `argus_apply_plan` can omit `steps=` after `argus_slice`.
+
+### Context across runs
+
+A new `argus agent` starts a **fresh chat** (`reset_session`). Prior runs contribute only via **case memory** (RAG hints when `ARGUS_MEMORY=1`), not full transcript replay. Logs: `~/.cache/argus/current.jsonl`.
+
+### Stability knobs
+
+| Env | Default | Effect |
+|-----|---------|--------|
+| `ARGUS_APPLY_BATCH` | 1 | Steps applied when `apply_plan` omits `steps=` |
+| `ARGUS_APPLY_FIX_STEPS` | 1 | Wrong model steps → use session plan |
+| `ARGUS_SLICE_LOOP_LIMIT` | 2 | Repeated slice → return cached plan |
+| `ARGUS_MAX_RESEARCH_ROUNDS` | 5 | Cap prose-only “I'm done” loops |

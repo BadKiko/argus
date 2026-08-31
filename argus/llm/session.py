@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -35,8 +36,112 @@ class SessionContext:
     tools_tried: List[str] = field(default_factory=list)
     verified_plans: List[Dict[str, Any]] = field(default_factory=list)
     tool_trace: List[Dict[str, Any]] = field(default_factory=list)
+    slice_repeat: int = 0
+    last_slice_key: str = ""
     auto_pivot_done: bool = False
     gate_fast_path_done: bool = False
+
+
+def _default_apply_batch() -> int:
+    raw = os.environ.get("ARGUS_APPLY_BATCH", "1").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def _apply_fix_steps_enabled() -> bool:
+    return os.environ.get("ARGUS_APPLY_FIX_STEPS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def max_research_rounds() -> int:
+    raw = os.environ.get("ARGUS_MAX_RESEARCH_ROUNDS", "5").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 5
+
+
+def _slice_loop_limit() -> int:
+    raw = os.environ.get("ARGUS_SLICE_LOOP_LIMIT", "2").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
+def _bin_key(path: str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except Exception:
+        return str(path)
+
+
+def note_slice_call(binary: str, query: Optional[str], plan_len: int) -> int:
+    """Track repeated slice on same binary+query; return repeat count."""
+    sess = get_session()
+    key = f"{_bin_key(binary)}|{query or ''}"
+    if key == sess.last_slice_key:
+        sess.slice_repeat += 1
+    else:
+        sess.last_slice_key = key
+        sess.slice_repeat = 1
+    return sess.slice_repeat
+
+
+def slice_loop_detected(binary: str, query: Optional[str]) -> bool:
+    sess = get_session()
+    key = f"{_bin_key(binary)}|{query or ''}"
+    return key == sess.last_slice_key and sess.slice_repeat >= _slice_loop_limit()
+
+
+def resolve_apply_steps(
+    binary: str,
+    steps: Optional[List[Dict[str, Any]]],
+    *,
+    max_steps: Optional[int] = None,
+) -> tuple[Optional[List[Dict[str, Any]]], str, str]:
+    """
+    Resolve patch steps for apply_plan.
+    Returns (steps, source, note) where source is explicit|session_slice|session_verified|missing.
+    """
+    batch = _default_apply_batch() if max_steps is None else max(1, int(max_steps))
+    sess = get_session()
+
+    if steps:
+        explicit = list(steps)
+        if (
+            sess.last_slice_patch_plan
+            and _apply_fix_steps_enabled()
+            and sess.last_slice_binary
+            and _bin_key(sess.last_slice_binary) == _bin_key(binary)
+        ):
+            from argus.apply_plan import _steps_subset_of_plan
+
+            allowed = list(sess.last_slice_patch_plan) + get_verified_plan_steps()
+            if allowed and not _steps_subset_of_plan(explicit, allowed, binary):
+                fixed = allowed[:batch]
+                return (
+                    fixed,
+                    "session_slice",
+                    "model steps mismatched slice — using session patch_plan batch",
+                )
+        return explicit, "explicit", ""
+
+    plan = list(sess.last_slice_patch_plan or [])
+    if plan and sess.last_slice_binary and _bin_key(sess.last_slice_binary) == _bin_key(binary):
+        return plan[:batch], "session_slice", f"auto from last argus_slice ({min(batch, len(plan))} step(s))"
+
+    verified = get_verified_plan_steps()
+    if verified:
+        return verified[:batch], "session_verified", f"auto from verified plan ({min(batch, len(verified))} step(s))"
+
+    return None, "missing", "run argus_slice first or pass steps="
 
 
 _current: Optional[SessionContext] = None

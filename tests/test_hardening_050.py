@@ -37,7 +37,7 @@ def test_dispatch_apply_plan_requires_steps():
     raw = dispatch_tool("argus_apply_plan", {"binary": str(FAUXWARE), "for_task": 1})
     data = json.loads(raw)
     assert data.get("ok") is False
-    assert "steps" in (data.get("summary") or "").lower() or data.get("next_errors")
+    assert "slice" in (data.get("summary") or "").lower() or data.get("next_errors")
 
 
 def test_diagnose_failure_requires_needle():

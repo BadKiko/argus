@@ -211,9 +211,9 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_apply_plan",
-        "Apply patch_plan steps in order, then composite verify (bytes + static disasm). "
-        "REQUIRED: steps= copied verbatim from argus_slice, argus_diagnose_failure corrective_patch, "
-        "or argus_decision_flow patch_candidates. Never invent steps. Pass for_task.",
+        "Apply patch_plan steps in order, then composite verify. "
+        "After argus_slice you may omit steps= — session patch_plan is applied automatically (ARGUS_APPLY_BATCH, default 1). "
+        "Or pass steps= from slice/diagnose/decision_flow. Pass for_task.",
         {
             "binary": {"type": "string"},
             "output": {"type": "string", "description": "Patched primary output path (default binary.patched)"},
@@ -223,9 +223,13 @@ ARGUS_TOOLS: List[dict] = [
                 "items": {"type": "string"},
                 "description": "Module paths referenced in step.module fields",
             },
+            "max_steps": {
+                "type": "integer",
+                "description": "When steps omitted, apply first N from session plan (default ARGUS_APPLY_BATCH=1)",
+            },
             "steps": {
                 "type": "array",
-                "description": "REQUIRED patch_plan steps from tool evidence",
+                "description": "Optional — omit after slice to use session patch_plan",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -239,7 +243,7 @@ ARGUS_TOOLS: List[dict] = [
                 },
             },
         },
-        ["binary", "steps"],
+        ["binary"],
     ),
     openai_tool(
         "argus_cfg",
@@ -1090,7 +1094,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
 
     if name == "argus_slice":
         from argus.find_slice import gate_scan, gate_scan_modules
-        from argus.llm.session import record_gate_scan_result
+        from argus.llm.session import cached_gate_scan, note_slice_call, record_gate_scan_result, slice_loop_detected
 
         binary = arguments["binary"]
         query = arguments.get("query")
@@ -1098,10 +1102,33 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         if multi is None:
             multi = True
         modules = arguments.get("modules")
+
+        cached = cached_gate_scan(binary, query=query, modules=modules, multi=bool(multi))
+        if cached and slice_loop_detected(binary, query):
+            d = dict(cached)
+            d["summary"] = (d.get("summary") or "") + " (cached — repeated slice skipped)"
+            plan = d.get("patch_plan") or []
+            note_slice_call(binary, query, len(plan))
+            return _truncate(
+                {
+                    "ok": True,
+                    "summary": d.get("summary"),
+                    "cached": True,
+                    "patch_plan": plan,
+                    "observations": [f"cached slice plan={len(plan)} — change query/module or pivot"],
+                    "next_hint": d.get("next_hint"),
+                    "evidence": {"patch_plan": plan, "cached": True},
+                    "verify": {"kind": "none", "ok": None},
+                },
+                limit=14000,
+            )
+
         if multi:
             d = gate_scan_modules(binary, modules=modules, query=query, auto_widen=True)
         else:
             d = gate_scan(binary, query)
+        plan = d.get("patch_plan") or []
+        note_slice_call(binary, query, len(plan))
         record_gate_scan_result(
             binary,
             d.get("patch_plan") or [],
@@ -1114,6 +1141,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         patch_plan = d.get("patch_plan") or []
         slice_obs = [
             f"plan={len(patch_plan)} gates={len(d.get('gate_candidates') or [])}",
+            f"session_ready={'yes' if patch_plan else 'no'} — argus_apply_plan without steps= applies batch",
         ]
         if previews and previews[0].get("disasm"):
             slice_obs.append(
@@ -1152,41 +1180,43 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
 
     if name == "argus_apply_plan":
         from argus.apply_plan import apply_plan
+        from argus.llm.session import resolve_apply_steps
         from argus.patch.sandbox import test_patch_in_sandbox
 
         binary = arguments["binary"]
         modules = arguments.get("modules")
-        steps = arguments.get("steps")
-        if not steps:
+        max_steps = arguments.get("max_steps")
+        plan_steps, step_source, step_note = resolve_apply_steps(
+            binary,
+            arguments.get("steps"),
+            max_steps=max_steps,
+        )
+        if not plan_steps:
             return _truncate(
                 {
                     "ok": False,
-                    "summary": "argus_apply_plan requires explicit steps= from tool evidence",
-                    "next_errors": [
-                        "call argus_slice, argus_diagnose_failure, or argus_decision_flow first",
-                        "copy corrective_patch or patch_plan into steps=",
-                    ],
-                    "next_hint": "steps= is required in 0.5 — no auto-slice from agent",
+                    "summary": "argus_apply_plan: no steps (run argus_slice first or pass steps=)",
+                    "next_errors": [step_note],
+                    "next_hint": "argus_slice then argus_apply_plan with only binary= (uses session plan)",
                     "verify": {"kind": "patch_bytes", "ok": False, "detail": "missing steps"},
                 },
                 limit=8000,
             )
 
-        plan_steps = list(steps)
-        if plan_steps:
-            sb = test_patch_in_sandbox(binary, plan_steps)
-            if not sb.get("safe"):
-                return _truncate(
-                    {
-                        "ok": False,
-                        "summary": f"sandbox preflight failed: {sb.get('detail')}",
-                        "next_hint": sb.get("suggested_action")
-                        or "fix patch plan before apply_plan",
-                        "sandbox": sb,
-                        "verify": {"kind": "patch_behavior", "ok": False, "detail": sb.get("detail")},
-                    },
-                    limit=14000,
-                )
+        sb = test_patch_in_sandbox(binary, plan_steps)
+        if not sb.get("safe"):
+            return _truncate(
+                {
+                    "ok": False,
+                    "summary": f"sandbox preflight failed: {sb.get('detail')}",
+                    "next_hint": sb.get("suggested_action")
+                    or "fix patch plan before apply_plan",
+                    "step_source": step_source,
+                    "sandbox": sb,
+                    "verify": {"kind": "patch_behavior", "ok": False, "detail": sb.get("detail")},
+                },
+                limit=14000,
+            )
 
         d = apply_plan(
             binary,
@@ -1198,6 +1228,8 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         verify = d.get("verify") or {}
         behavior = verify.get("patch_behavior") or {}
         observations = [
+            f"step_source={step_source}",
+            *( [step_note] if step_note else [] ),
             f"plan_source={d.get('plan_source')} steps={len(d.get('applied') or [])}/{len(d.get('patch_plan') or [])}",
             f"verify.kind={verify.get('kind')} verify.ok={verify.get('ok')}",
         ]
