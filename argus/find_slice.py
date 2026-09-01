@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from pathlib import Path
+
 from argus.binary import load_binary
 from argus.disasm.recovery import function_covering
 from argus.find import find_string_xrefs_multi, suggest_patches_near
@@ -1115,7 +1117,7 @@ def gate_scan_modules(
     If modules omitted, discover linked modules with license score > 0.
     If plan still empty and auto_widen: search nearby binaries (siblings / install dir).
     """
-    from argus.discover import discover_targets, linked_modules, signal_score, resolve_link_base, widen_modules
+    from argus.discover import discover_targets, linked_modules, signal_score, resolve_link_base, widen_modules, is_patch_artifact
 
     paths: List[str] = [primary]
     install_root: Optional[str] = None
@@ -1128,19 +1130,29 @@ def gate_scan_modules(
     link_primary = str(resolve_link_base(primary, install_root))
     if modules:
         for m in modules:
-            if m and m not in paths:
+            if m and m not in paths and not is_patch_artifact(Path(m).name):
                 paths.append(m)
     else:
         disc = discover_targets(binary=link_primary, root=install_root, max_linked=max_modules)
         for m in disc.get("linked") or []:
             p = m.get("path")
-            if p and int(m.get("score") or 0) > 0 and p not in paths:
+            if (
+                p
+                and int(m.get("score") or 0) > 0
+                and p not in paths
+                and not is_patch_artifact(Path(p).name)
+            ):
                 paths.append(p)
         if len(paths) == 1:
             for lp in linked_modules(link_primary, limit=max_modules):
-                if str(lp) not in paths and signal_score(lp) > 0:
-                    paths.append(str(lp))
+                lp_s = str(lp)
+                if lp_s not in paths and signal_score(lp) > 0 and not is_patch_artifact(lp.name):
+                    paths.append(lp_s)
 
+    paths = [p for p in paths if not is_patch_artifact(Path(p).name)]
+    if not paths:
+        # Primary itself may be a *.patched work copy — still slice it.
+        paths = [primary]
     paths = paths[: max_modules + 1]
     all_gates: List[Dict[str, Any]] = []
     all_hits: List[Dict[str, Any]] = []

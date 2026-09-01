@@ -75,9 +75,17 @@ def _suggested_ret_value(name: str) -> int:
     return 0
 
 
-def _query_intent(query: Optional[str]) -> str:
+def _query_intent(query: Optional[str], task_text: Optional[str] = None) -> str:
     """Return 'ui' | 'gate_transform' | 'mixed' for next_hint tone (no vendor logic)."""
+    if task_text is None:
+        try:
+            from argus.llm.session import get_session
+
+            task_text = get_session().user_task_text or ""
+        except Exception:
+            task_text = ""
     q = (query or "").lower()
+    task_low = (task_text or "").lower()
     gate_kw = (
         "unlock",
         "bypass",
@@ -90,6 +98,7 @@ def _query_intent(query: Optional[str]) -> str:
         "force success",
         "license check",
         "проверк",
+        "лиценз",
     )
     ui_kw = (
         "title",
@@ -110,6 +119,9 @@ def _query_intent(query: Optional[str]) -> str:
     )
     wants_gate = any(k in q for k in gate_kw)
     wants_ui = any(k in q for k in ui_kw)
+    task_gate = any(k in task_low for k in gate_kw)
+    if task_gate and not wants_ui:
+        return "gate_transform"
     if wants_gate and wants_ui:
         return "mixed"
     if wants_gate:
@@ -117,6 +129,8 @@ def _query_intent(query: Optional[str]) -> str:
     if wants_ui:
         return "ui"
     if q and not any(k in q for k in ("license", "licence", "trial", "activat", "unlock")):
+        if task_gate:
+            return "gate_transform"
         return "ui"
     return "gate_transform" if any(k in q for k in ("license", "licence", "trial", "activat")) else "mixed"
 
@@ -192,6 +206,108 @@ def _scan_section_ci(data: bytes, needle: bytes) -> List[int]:
     return out
 
 
+def query_string_needles(query: str) -> List[Tuple[str, bytes]]:
+    """Exact user/runtime fragment in common C/C++ encodings — no product token lists."""
+    q = (query or "").strip()
+    if len(q) < 3:
+        return []
+    out: List[Tuple[str, bytes]] = []
+    seen: set[bytes] = set()
+
+    def add(kind: str, raw: bytes) -> None:
+        if len(raw) < 3 or raw in seen:
+            return
+        seen.add(raw)
+        out.append((kind, raw))
+
+    qb = q.encode("utf-8", errors="replace")
+    variants = [q]
+    if qb.isascii() and 3 <= len(q) <= 120:
+        for v in (q.lower(), q.title(), q.upper()):
+            if v not in variants:
+                variants.append(v)
+    for v in variants:
+        add("utf8", v.encode("utf-8", errors="replace"))
+        if v.isascii() and 4 <= len(v) <= 120:
+            add("utf16le", v.encode("utf-16le"))
+            add("utf32le", v.encode("utf-32le"))
+    return out
+
+
+def rewind_encoded_string(data: bytes, off: int, kind: str) -> Tuple[int, bytes]:
+    """Walk back to the C-string start so xrefs hit `mov reg, imm` of the label, not mid-text."""
+    if kind == "utf32le":
+        s = off - (off % 4)
+        while s >= 4 and data[s - 4 : s] != b"\x00\x00\x00\x00" and off - s < 960:
+            s -= 4
+        end = s
+        while end + 4 <= len(data) and data[end : end + 4] != b"\x00\x00\x00\x00" and end - s < 384:
+            end += 4
+        return s, data[s:end]
+    if kind == "utf16le":
+        s = off if off % 2 == 0 else off - 1
+        while s >= 2 and data[s - 2 : s] != b"\x00\x00" and off - s < 480:
+            s -= 2
+        end = s
+        while end + 2 <= len(data) and data[end : end + 2] != b"\x00\x00" and end - s < 192:
+            end += 2
+        return s, data[s:end]
+    s = off
+    while s > 0 and data[s - 1] != 0 and off - s < 240:
+        s -= 1
+    preview = data[s : s + 96].split(b"\0")[0]
+    return s, preview
+
+
+def decode_encoded_preview(raw: bytes, kind: str) -> str:
+    enc = {"utf32le": "utf-32le", "utf16le": "utf-16le"}.get(kind, "utf-8")
+    try:
+        text = raw.decode(enc, errors="replace")
+    except Exception:
+        text = raw.decode("latin1", errors="replace")
+    return text.replace("\x00", "")
+
+
+def locate_query_string(img, query: str) -> Optional[Dict[str, Any]]:
+    """First VA of query in image sections (utf8 / utf16le / utf32le), rewound to label start."""
+    q = (query or "").strip()
+    if len(q) < 3:
+        return None
+    for kind, needle in query_string_needles(q):
+        for sec in getattr(img, "sections", []) or []:
+            data = getattr(sec, "data", None)
+            if not data:
+                continue
+            idx = data.find(needle)
+            if idx < 0 and kind == "utf8":
+                offs = _scan_section_ci(data, needle)
+                idx = offs[0] if offs else -1
+            if idx < 0:
+                continue
+            start, preview = rewind_encoded_string(data, idx, kind)
+            text = decode_encoded_preview(preview, kind)
+            if not text.strip():
+                continue
+            return {
+                "addr": int(sec.addr) + start,
+                "kind": kind,
+                "preview": text[:96],
+                "match_off": idx - start,
+                "section": getattr(sec, "name", ""),
+            }
+    return None
+
+
+_PRINTF_RX = re.compile(
+    r"%(?:\d+\$)?[-+#0 ]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[diouxXeEfFgGaAcspn%]"
+)
+
+
+def _looks_format_template(preview: str) -> bool:
+    """printf/format templates are not observed runtime banners."""
+    return bool(_PRINTF_RX.search(preview or ""))
+
+
 def _junk_preview(preview: str) -> bool:
     p = preview.lower()
     if "std::" in p or "gnu_cxx" in p or "qstring" in p and "license" not in p:
@@ -215,6 +331,8 @@ def _score_hit(preview: str, needle: str, kind: str) -> int:
         score += 20
     if _junk_preview(preview):
         score -= 100
+    if _looks_format_template(preview):
+        score -= 80
     return score
 
 
@@ -1023,6 +1141,34 @@ def rank_gate_candidates(
     return out
 
 
+def _diagnose_next_hint(hits: List[Dict[str, Any]], query: Optional[str] = None) -> str:
+    """Steer gate work to diagnose_failure from a verbatim hit — not freestyle patch."""
+    strings = [h for h in hits if h.get("kind") == "string" and h.get("preview")]
+    top = next((h for h in strings if not _looks_format_template(str(h.get("preview") or ""))), None)
+    if top is None and strings:
+        preview = str(strings[0].get("preview") or "").strip().replace("\n", " ")[:80]
+        return (
+            f"top hit {preview!r} looks like a format template, not a runtime banner. "
+            "Exec once (or atlas) and pass a verbatim stdout/GUI line to "
+            "argus_diagnose_failure. Do not apply a wide parser plan first."
+        )
+    if top is None and hits:
+        top = hits[0]
+    if not top:
+        q = (query or "").strip()
+        extra = f" query={q!r}" if q else ""
+        return (
+            f"0 string hits{extra} — try find/atlas with other task nouns, or exec once "
+            "and pass the verbatim banner to argus_diagnose_failure. Do not invent architecture."
+        )
+    preview = str(top.get("preview") or "").strip().replace("\n", " ")[:80]
+    return (
+        f"argus_diagnose_failure(error_text={preview!r}) then argus_apply_plan "
+        "(omit steps= to use corrective_patch / suggested_batches[0]). "
+        "Do not argus_patch atlas jumps. Empty slice is incomplete, not failure."
+    )
+
+
 def find_in_binary(
     path: str,
     query: Optional[str] = None,
@@ -1130,6 +1276,23 @@ def find_in_binary(
                 if len(scored) >= limit * 4:
                     break
 
+    # Wide encodings of the original phrase (utf-16/32) — same query, not token soup.
+    if query and len(query.strip()) >= 4:
+        q0 = query.strip()
+        for kind, needle in query_string_needles(q0):
+            if kind == "utf8":
+                continue
+            for sec in img.sections:
+                if not sec.data or sec.executable:
+                    continue
+                idx = sec.data.find(needle)
+                if idx < 0:
+                    continue
+                start, preview = rewind_encoded_string(sec.data, idx, kind)
+                text = decode_encoded_preview(preview, kind)
+                if text:
+                    add(sec.addr + start, "string", text, q0.lower())
+
     scored.sort(key=lambda x: -x[0])
     hits = [h for _, h in scored[:limit]]
 
@@ -1140,7 +1303,6 @@ def find_in_binary(
 
     gate_candidates: List[Dict[str, Any]] = []
     patch_candidates: List[Dict[str, Any]] = []
-    next_hint_slice: Optional[str] = None
     if with_xrefs:
         top = [h for h in hits if h["kind"] == "string" and h["score"] >= 80][:5]
         if not top:
@@ -1179,12 +1341,8 @@ def find_in_binary(
             )
             gate_candidates = gate_candidates[:12]
             patch_candidates = list(gate_candidates)
-            if sliced.get("next_hint") and any(
-                not g.get("ui_label_only") for g in gate_candidates
-            ):
-                next_hint_slice = sliced["next_hint"]
         except Exception:
-            next_hint_slice = None
+            pass
 
     uniq_p = patch_candidates[:12]
 
@@ -1212,55 +1370,12 @@ def find_in_binary(
                 "UI/text request: argus_find with the exact phrase to change, then "
                 "replace_string (new ≤ old length). Do NOT ret_imm for titles/labels."
             )
-    elif suggested_stubs:
-        names = [s["name"] for s in suggested_stubs[:6]]
-        addrs0 = [s["addr"] for s in suggested_stubs if int(s["value"]) == 0][:6]
-        addrs1 = [s["addr"] for s in suggested_stubs if int(s["value"]) == 1][:4]
-        parts = [
-            f"PREFERRED gate path: stub ranked gate_symbols (not UI Callback/Widget from string xrefs). "
-            f"Top gates={names}."
-        ]
-        if addrs0:
-            parts.append(
-                f"argus_patch kind=ret_imm addrs={addrs0} value=0 "
-                f"(Is/Check/Verify/Validate OK-style)."
-            )
-        if addrs1:
-            parts.append(
-                f"Then chain binary=.patched kind=ret_imm addrs={addrs1} value=1 "
-                f"(bool isActivated/Has* style)."
-            )
-        parts.append("Do NOT ret_imm *Callback* / *Widget* alone — that usually leaves PRO locked.")
-        if intent == "mixed":
-            parts.append("After gate transform, use replace_string for any UI text the user asked for.")
-        next_hint = " ".join(parts)
-    elif gate_candidates:
-        top_g = gate_candidates[0]
-        non_ui = [g for g in gate_candidates if not g.get("ui_label_only")]
-        pick = non_ui[0] if non_ui else top_g
-        if next_hint_slice and non_ui:
-            next_hint = next_hint_slice
-        else:
-            taken_bit = ""
-            if pick.get("kind") == "force_branch" and "taken" in pick:
-                taken_bit = f" taken={pick.get('taken')}"
-            next_hint = (
-                f"gate_candidates ranked: prefer score>=40 and ui_label_only=false. "
-                f"Try argus_patch kind={pick.get('kind')} addr={pick.get('addr')} "
-                f"value={pick.get('ret_guess', 1)}{taken_bit} — {pick.get('reason')}. "
-                f"If ui_label_only, do NOT claim behavior change; try next candidate then re-find strings."
-            )
-        if stripped:
-            next_hint += " Stripped: prefer argus_slice then force_branch/ret_imm on non_ui gates."
     else:
-        next_hint = (
-            "no suggested_stubs and no gate_candidates; binary may be stripped — "
-            "do not claim behavior verified; dig with more queries/xrefs/lift or report incomplete"
-        )
-        if stripped:
+        next_hint = _diagnose_next_hint(hits, query)
+        if stripped and not hits:
             next_hint = (
-                "STRIPPED commercial-like binary: call argus_slice then argus_apply_plan. "
-                "Patch patch_plan only; never claim behavior change from UI strings alone."
+                "STRIPPED: 0 hits for this query — try other task nouns, then "
+                "diagnose_failure(error_text=verbatim preview). Empty slice is not failure."
             )
 
     return {

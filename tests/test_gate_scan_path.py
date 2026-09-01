@@ -69,3 +69,16 @@ def test_bcompare_call_cmp_refcount_not_gate_optional():
         assert (plan[0].get("confidence") or "low") != "high" or "call→cmp" in (
             plan[0].get("why") or ""
         ).lower()
+
+
+def test_gate_scan_modules_patched_primary_does_not_crash(tmp_path):
+    import shutil
+
+    from argus.find_slice import gate_scan_modules
+
+    patched = tmp_path / "app.patched"
+    shutil.copy(SAMPLES / "fauxware", patched)
+    patched.chmod(0o755)
+    d = gate_scan_modules(str(patched), query="password", auto_widen=False)
+    assert d.get("ok") is True
+    assert d.get("primary") == str(patched)
