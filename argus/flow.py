@@ -129,6 +129,7 @@ class DecisionGraph:
                     "addr": hex(g.addr),
                     "taken": True,
                     "why": "Force jump to bypass error sink",
+                    "taint_source": g.taint_source or "",
                 })
             elif g.recommended_action == "force_fallthrough":
                 plan.append({
@@ -136,6 +137,7 @@ class DecisionGraph:
                     "addr": hex(g.addr),
                     "taken": False,
                     "why": "NOP conditional branch that jumps into error sink",
+                    "taint_source": g.taint_source or "",
                 })
 
         if img is not None:
@@ -404,6 +406,8 @@ _REJECT_UI_TOKENS = (
     "expired",
     "unregistered",
     "evaluation",
+    "trial",
+    "license",
     "error",
     "failed",
     "failure",
@@ -539,7 +543,7 @@ def auto_diagnose_plan(img: Any) -> Dict[str, Any]:
     best: Dict[str, Any] = {}
     best_score = -1
     for text in discover_reject_ui_strings(img):
-        diag = diagnose_failure(img, error_text=text)
+        diag = diagnose_failure(img, error_text=text, use_atlas=False)
         patch = list(diag.get("corrective_patch") or [])
         if not patch:
             continue
@@ -689,12 +693,189 @@ def enrich_patch_plan(img: Any, graph: DecisionGraph, plan: List[Dict[str, Any]]
     return out
 
 
+_JCC_OPS = frozenset(
+    {
+        "je", "jne", "jz", "jnz", "ja", "jae", "jb", "jbe", "jg", "jge", "jl", "jle",
+        "js", "jns", "jo", "jno", "jp", "jpo",
+    }
+)
+
+
+def _caller_sites(rec: Dict[str, Any]) -> List[int]:
+    out: List[int] = []
+    for s in rec.get("sites") or []:
+        try:
+            out.append(int(s, 0))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _plan_from_sink_sites(img: Any, sink: int, sites: List[int]) -> List[Dict[str, Any]]:
+    """Turn every call to the error sink into nop_call or a preceding force_branch."""
+    import capstone as cs
+
+    mode = cs.CS_MODE_64 if getattr(img, "bits", 64) == 64 else cs.CS_MODE_32
+    md = cs.Cs(cs.CS_ARCH_X86, mode)
+    plan: List[Dict[str, Any]] = []
+    seen: Set[int] = set()
+    for site in sites[:16]:
+        if site in seen:
+            continue
+        seen.add(site)
+        lo = max(0, site - 0x50)
+        data = img.read_bytes(lo, site - lo + 16) or b""
+        insns = list(md.disasm(data, lo))
+        last_jcc = None
+        call_ins = None
+        for ins in insns:
+            if ins.mnemonic in _JCC_OPS:
+                last_jcc = ins
+            if ins.mnemonic == "call" and abs(ins.address - site) <= 4:
+                call_ins = ins
+        if last_jcc is not None:
+            taken = True
+            try:
+                jtgt = int(last_jcc.op_str, 16)
+                # jump past the call → force taken to skip the sink
+                taken = jtgt > site
+            except (TypeError, ValueError):
+                taken = True
+            plan.append(
+                {
+                    "kind": "force_branch",
+                    "addr": hex(last_jcc.address),
+                    "taken": taken,
+                    "why": f"gate before call to error sink {hex(sink)} @ {hex(site)}",
+                    "confidence": "medium",
+                }
+            )
+        elif call_ins is not None:
+            plan.append(
+                {
+                    "kind": "nop_call",
+                    "addr": hex(call_ins.address),
+                    "size": call_ins.size,
+                    "why": f"NOP call to error sink {hex(sink)}",
+                    "confidence": "medium",
+                }
+            )
+        else:
+            plan.append(
+                {
+                    "kind": "nop_call",
+                    "addr": hex(site),
+                    "size": 5,
+                    "why": f"NOP call site to error sink {hex(sink)}",
+                    "confidence": "low",
+                }
+            )
+    return plan
+
+
+def _diagnose_via_atlas(img: Any, error_text: str, found_va: int) -> Dict[str, Any]:
+    """FPC/resource tables: no lea to the string — walk atlas callers of the sink."""
+    from argus.atlas import build_atlas
+
+    path = getattr(img, "path", None)
+    if not path:
+        return {"ok": False, "corrective_patch": []}
+    atlas = build_atlas(str(path), query=error_text[:80], string_addr=found_va)
+    ranked: List[Tuple[int, int, Dict[str, Any], List[int]]] = []
+    for rec in atlas.get("callers") or []:
+        sites = _caller_sites(rec)
+        n = len(sites)
+        if not (2 <= n <= 32):
+            continue
+        span = (max(sites) - min(sites)) if n >= 2 else 0
+        if span > 0x100000:
+            continue
+        compactness = 50 if span < 0x8000 else (20 if span < 0x40000 else 0)
+        score = compactness + n
+        ranked.append((score, span, rec, sites))
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    if not ranked:
+        return {
+            "ok": False,
+            "string_addr": hex(found_va),
+            "corrective_patch": [],
+            "explanation": "atlas mapped the string but found no clustered caller-set (2–64 sites)",
+            "atlas_summary": atlas.get("summary"),
+        }
+
+    _score, span, sink_rec, sites = ranked[0]
+    sink_va = int(sink_rec.get("fn") or "0", 0)
+    plan = _plan_from_sink_sites(img, sink_va, sites)
+
+    # Decision flow on the function that contains the most sink-call sites.
+    handler = None
+    best_cover = 0
+    for mod in atlas.get("modules") or []:
+        for fn in mod.get("functions") or []:
+            try:
+                lo = int(fn.get("fn") or "0", 0)
+            except (TypeError, ValueError):
+                continue
+            hi = lo + int(fn.get("size") or 0)
+            cover = sum(1 for s in sites if lo <= s < hi)
+            if cover > best_cover:
+                best_cover = cover
+                handler = lo
+    flow_text = ""
+    if handler:
+        graph = build_decision_flow(img, handler)
+        flow_text = graph.to_text_flow()
+        # eh_frame covering on stripped binaries can jump to a megabyte-wide "function"
+        if abs(int(graph.func_addr) - handler) <= 0x80:
+            extra = graph.synthesize_patch_plan(img)
+            seen_addr = {p.get("addr") for p in plan}
+            for step in extra:
+                if step.get("addr") not in seen_addr:
+                    plan.append(step)
+                    seen_addr.add(step.get("addr"))
+
+    plan = _cap_patch_plan(plan, max_steps=12)
+    hops = atlas.get("hops") or []
+    hop_note = ""
+    if hops:
+        hop_note = " Linked modules: " + ", ".join(
+            f"{h.get('to')} ({h.get('via')})" for h in hops[:6]
+        )
+    return {
+        "ok": True,
+        "symptom": error_text,
+        "string_addr": hex(found_va),
+        "leaf_dialog_func": hex(sink_va),
+        "caller_func": hex(handler) if handler else None,
+        "root_cause": (
+            f"Error string has no code lea (table-backed). Sink {hex(sink_va)} "
+            f"called from {len(sites)} sites"
+            + (f" (span {hex(span)})" if span else "")
+        ),
+        "explanation": (
+            f"Atlas walked string {hex(found_va)} → sink {hex(sink_va)} "
+            f"with {len(sites)} call sites. Apply corrective_patch to ALL listed sites, "
+            "then verify with the same error_text as reject_texts. "
+            "If launch crashes, those sites are shared with boot — roll back and patch "
+            "only the cluster that atlas marked via=caller from this string."
+            + hop_note
+        ),
+        "decision_flow": flow_text,
+        "corrective_patch": plan,
+        "atlas_callers": [
+            {"fn": sink_rec.get("fn"), "count": sink_rec.get("count"), "sites": sink_rec.get("sites")}
+        ],
+        "atlas_summary": atlas.get("summary"),
+    }
+
+
 def diagnose_failure(
     img: Any,
     *,
     error_text: Optional[str] = None,
     crash_code: Optional[Union[int, str]] = None,
     last_patch_addr: Optional[Union[int, str]] = None,
+    use_atlas: bool = True,
 ) -> Dict[str, Any]:
     """Automated root-cause diagnosis of an observed error dialog or crash.
 
@@ -741,26 +922,23 @@ def diagnose_failure(
 
     # 2. Error string back-tracing
     if error_text:
-        needle = error_text.encode("utf-8", errors="replace")
-        found_va = None
-        for s in getattr(img, "sections", []):
-            if s.readable and s.data:
-                idx = s.data.find(needle)
-                if idx != -1:
-                    found_va = s.addr + idx
-                    break
+        from argus.find import locate_query_string
+
+        located = locate_query_string(img, error_text)
+        found_va = located["addr"] if located else None
 
         if not found_va:
-            # Try shorter substring
-            short = error_text[:30].strip().encode("utf-8", errors="replace")
-            for s in getattr(img, "sections", []):
-                if s.readable and s.data:
-                    idx = s.data.find(short)
-                    if idx != -1:
-                        found_va = s.addr + idx
-                        break
+            # Try shorter substring (utf-8 only — encodings of a clipped phrase are noisy)
+            short = error_text[:30].strip()
+            if len(short) >= 4 and short != error_text.strip():
+                located = locate_query_string(img, short)
+                found_va = located["addr"] if located else None
 
         if found_va:
+            if located:
+                diagnosis["string_addr"] = hex(found_va)
+                diagnosis["string_kind"] = located.get("kind")
+                diagnosis["string_preview"] = located.get("preview")
             xrefs = find_string_xrefs_multi(img, [found_va]).get(found_va, [])
             if xrefs:
                 leaf_addr = int(xrefs[0]["addr"], 16)
@@ -791,6 +969,11 @@ def diagnose_failure(
                     "Verify via apply_plan static bytes + capstone disasm (no GUI auto-input)."
                 )
                 return diagnosis
+
+            if use_atlas:
+                atlas_diag = _diagnose_via_atlas(img, error_text, found_va)
+                if atlas_diag.get("corrective_patch"):
+                    return atlas_diag
 
     diagnosis["ok"] = False
     diagnosis["explanation"] = f"Could not find exact string or crash root cause for '{error_text or crash_code}'"

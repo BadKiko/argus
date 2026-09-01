@@ -116,10 +116,40 @@ def _looks_gui_or_heavy(img) -> bool:
     """Large .text / GUI imports → do not exec as smoke (leaves windows alive)."""
     if _text_size(img) >= _SMOKE_MAX_TEXT:
         return True
-    for name in img.imports.values():
+    return looks_windowed_gui(img)
+
+
+def looks_windowed_gui(img) -> bool:
+    """True only when imports/DT_NEEDED look like a GUI toolkit — not merely a large CLI."""
+    for name in getattr(img, "imports", {}).values():
         low = (name or "").lower()
         if any(m in low for m in _GUI_IMPORT_MARKERS):
             return True
+    path = getattr(img, "path", None)
+    if path and str(getattr(img, "fmt", "")).lower() == "elf":
+        try:
+            from argus.binary.elf import list_elf_needed
+
+            for soname in list_elf_needed(path):
+                low = (soname or "").lower()
+                if any(
+                    tok in low
+                    for tok in (
+                        "gtk",
+                        "gdk",
+                        "qt",
+                        "wx",
+                        "x11",
+                        "xcb",
+                        "wayland",
+                        "sdl",
+                        "glfw",
+                        "clutter",
+                    )
+                ):
+                    return True
+        except Exception:
+            return False
     return False
 
 

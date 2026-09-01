@@ -100,28 +100,41 @@ def _find_window_containing(substr: str, *, timeout: float = 8.0):
 
 
 
-def _match_reject(texts: List[str], reject_texts: List[str]) -> List[str]:
+_DEFAULT_REJECT_UI = (
+    "30-day",
+    "evaluation period",
+    "trial expired",
+    "purchase a license",
+    "not registered",
+    "invalid license",
+    "unregistered",
+)
 
-    hits: List[str] = []
 
-    if not reject_texts:
-
-        return hits
-
-    blob = "\n".join(texts).lower()
-
-    for raw in reject_texts:
-
+def _merged_reject_texts(reject_texts: Optional[List[str]]) -> List[str]:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for raw in list(reject_texts or []) + list(_DEFAULT_REJECT_UI):
         needle = (raw or "").strip()
-
-        if len(needle) < 4:
-
+        low = needle.lower()
+        if len(needle) < 4 or low in seen:
             continue
+        seen.add(low)
+        merged.append(needle)
+    return merged
 
+
+def _match_reject(texts: List[str], reject_texts: List[str]) -> List[str]:
+    hits: List[str] = []
+    if not reject_texts:
+        return hits
+    blob = "\n".join(texts).lower()
+    for raw in reject_texts:
+        needle = (raw or "").strip()
+        if len(needle) < 4:
+            continue
         if needle.lower() in blob:
-
             hits.append(needle[:120])
-
     return hits
 
 
@@ -318,7 +331,7 @@ def observe_gui_launch(
 
         body_err = _match_error_body(ui_texts) if ui_texts else None
 
-        reject_hits = _match_reject(ui_texts, list(reject_texts or []))
+        reject_hits = _match_reject(ui_texts, _merged_reject_texts(reject_texts))
 
 
 
