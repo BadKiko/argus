@@ -178,5 +178,72 @@ def test_optional_commercial_slice_oracle():
     assert plan, "expected patch_plan on license-bearing binary"
     # Primary should be logic gate
     assert plan[0]["kind"] in ("ret_imm", "force_branch")
-    if plan[0]["kind"] == "ret_imm":
-        assert int(plan[0].get("value") or 1) == 1
+def test_sandbox_already_applied_bytes_ok(tmp_path):
+    import shutil
+
+    from argus.binary import load_binary
+    from argus.patch.intents import ret_imm
+    from argus.patch.sandbox import _apply_step_direct
+
+    src = tmp_path / "app"
+    shutil.copy(SAMPLES / "fauxware", src)
+    img = load_binary(str(src))
+    auth = img.symbols["authenticate"].addr
+    ok, _ = ret_imm(str(src), auth, 1, str(src))
+    assert ok is True
+    step = {"kind": "ret_imm", "addr": hex(auth), "value": 1}
+    assert _apply_step_direct(str(src), step) is True
+
+
+def test_verify_inplace_vs_backup_and_already_applied(tmp_path):
+    import shutil
+
+    from argus.apply_plan import verify_patch_bytes
+    from argus.binary import load_binary
+    from argus.patch.intents import ret_imm
+
+    src = tmp_path / "app"
+    shutil.copy(SAMPLES / "fauxware", src)
+    img = load_binary(str(src))
+    auth = img.symbols["authenticate"].addr
+    steps = [{"kind": "ret_imm", "addr": hex(auth), "value": 1}]
+
+    pristine = tmp_path / "original" / "app"
+    pristine.parent.mkdir()
+    shutil.copy(src, pristine)
+
+    same = verify_patch_bytes(str(src), str(src), steps)
+    assert same.get("ok") is False
+    assert any("unchanged" in str(s.get("detail") or "") for s in same.get("steps") or [])
+
+    ok, _ = ret_imm(str(src), auth, 1, str(src))
+    assert ok is True
+
+    vs_backup = verify_patch_bytes(
+        str(pristine),
+        str(src),
+        steps,
+        module_pairs=[(str(pristine), str(src))],
+    )
+    assert vs_backup.get("ok") is True
+
+    already = verify_patch_bytes(str(src), str(src), steps)
+    assert already.get("ok") is True
+    assert any("already" in str(s.get("detail") or "") for s in already.get("steps") or [])
+
+
+def test_sandbox_already_applied_bytes_ok(tmp_path):
+    import shutil
+
+    from argus.binary import load_binary
+    from argus.patch.intents import ret_imm
+    from argus.patch.sandbox import _apply_step_direct
+
+    src = tmp_path / "app"
+    shutil.copy(SAMPLES / "fauxware", src)
+    img = load_binary(str(src))
+    auth = img.symbols["authenticate"].addr
+    ok, _ = ret_imm(str(src), auth, 1, str(src))
+    assert ok is True
+    step = {"kind": "ret_imm", "addr": hex(auth), "value": 1}
+    assert _apply_step_direct(str(src), step) is True

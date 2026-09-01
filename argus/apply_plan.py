@@ -65,17 +65,45 @@ def _read_hex(path: str, addr: int, n: int = 8) -> str:
         return ""
 
 
+def _hex_to_bytes(raw: str) -> bytes:
+    try:
+        return bytes.fromhex(raw or "")
+    except ValueError:
+        return b""
+
+
+def bytes_match_patch_intent(kind: str, after: bytes, *, taken: bool = False, value: int = 1, size: int = 5) -> bool:
+    """True when `after` already looks like the intended patch encoding."""
+    if not after:
+        return False
+    k = (kind or "").strip()
+    if k == "force_branch":
+        if not taken:
+            return after[:2] == b"\x90\x90" or after[:1] == b"\x90"
+        return after[0] in (0xEB, 0xE9)
+    if k == "ret_imm":
+        return len(after) >= 6 and after[0] == 0xB8 and after[5] == 0xC3
+    if k in ("nop_call", "nop_bytes"):
+        n = max(1, int(size or 5))
+        return after[:n] == b"\x90" * n
+    if k == "force_flag":
+        return len(after) >= 4 and after[0] == 0xC6 and after[3] == 0x01
+    return False
+
+
 def _module_output(src: str, primary_out: str, primary_src: str) -> str:
     """Map source module → output path when primary has a single output name."""
+    from argus.patch.deploy import in_place_enabled
+
     src_p = Path(src).resolve()
     prim_p = Path(primary_src).resolve()
     out_p = Path(primary_out)
+    if in_place_enabled():
+        return str(src_p)
     if src_p == prim_p:
         return str(out_p)
-    # sibling: same directory as primary output, name + -patch / .patched
     parent = out_p.parent
-    stem = Path(src).name
-    return str(parent / f"{stem}-patch")
+    return str(parent / Path(src).name)
 
 
 def _is_diagnose_plan(plan: List[Dict[str, Any]], path: str = "") -> bool:
@@ -110,13 +138,24 @@ def verify_patch_bytes(
             "steps": [],
         }
 
-    # Map module src → patched path
+    # Map module path → (before_image, after_image). Index both ends so in-place
+    # pairs (original/backup, work copy) resolve when the step names the work path.
     pair_map: Dict[str, Tuple[str, str]] = {}
+
+    def _index_pair(src: str, dst: str) -> None:
+        pair = (src, dst)
+        for p in (src, dst):
+            try:
+                pair_map[str(Path(p).resolve())] = pair
+            except OSError:
+                pair_map[str(p)] = pair
+            pair_map[Path(p).name] = pair
+
     if module_pairs:
         for src, dst in module_pairs:
-            pair_map[str(Path(src).resolve())] = (src, dst)
+            _index_pair(src, dst)
     else:
-        pair_map[str(Path(original).resolve())] = (original, patched)
+        _index_pair(original, patched)
 
     for step in steps:
         kind = step.get("kind")
@@ -156,9 +195,17 @@ def verify_patch_bytes(
         after = img1.read_bytes(addr, 8) or b""
         row["before"] = before.hex()
         row["after"] = after.hex()
-        if before == after:
+        taken = bool(step.get("taken", False))
+        size = int(step.get("size") or 5)
+        already = bytes_match_patch_intent(str(kind or ""), after, taken=taken, size=size)
+        if before == after and not already:
             row["detail"] = "bytes unchanged"
             all_ok = False
+            details.append(row)
+            continue
+        if before == after and already:
+            row["ok"] = True
+            row["detail"] = "already matches intended encoding"
             details.append(row)
             continue
         if kind == "ret_imm":
@@ -647,12 +694,21 @@ def apply_plan(
 
     module_outs: Dict[str, str] = {}
     pairs: List[Tuple[str, str]] = []
+    from argus.patch.deploy import ensure_original_backup, in_place_enabled
+
     for s in plan:
         mod = str(s.get("module") or path)
         if mod not in module_outs:
             dst = _module_output(mod, out, path)
             src_p = Path(mod)
             dst_p = Path(dst)
+            if in_place_enabled():
+                backup = ensure_original_backup(src_p)
+                work = str(src_p.resolve())
+                module_outs[mod] = work
+                # Verify against pristine backup, not the already-patched work copy.
+                pairs.append((str(backup), work))
+                continue
             if src_p.resolve() != dst_p.resolve():
                 from argus.binary.file_io import copy_binary_resilient
 
@@ -733,7 +789,16 @@ def apply_plan(
             break
         after = _read_hex(dst, addr, 8)
         row["after"] = after
-        row["ok"] = bool(ok_step) and before != after
+        already = bytes_match_patch_intent(
+            str(kind or ""),
+            _hex_to_bytes(after),
+            taken=bool(step.get("taken", False)),
+            value=int(step.get("value") if step.get("value") is not None else 1),
+            size=int(step.get("size") or 5),
+        )
+        row["ok"] = bool(ok_step) and (before != after or already)
+        if row["ok"] and before == after and already:
+            step_detail = (step_detail + " — already applied").strip(" —")
         row["detail"] = step_detail
         applied.append(row)
         if not ok_step:
@@ -776,16 +841,28 @@ def apply_plan(
             verify["detail"] = "bytes+static disasm ok (no GUI input)"
     ok = bool(verify.get("ok")) and all(a.get("ok") for a in applied)
     primary_out = module_outs.get(path, out)
+    deploy_info: Optional[Dict[str, Any]] = None
     if ok and primary_out and Path(primary_out).is_file():
-        p_out = Path(primary_out)
-        if p_out.parent.name == ".argus-work":
-            native_out = p_out.parent.parent / p_out.name
-            try:
-                shutil.copy2(primary_out, native_out)
-                primary_out = str(native_out)
-                module_outs[path] = primary_out
-            except Exception:
-                pass
+        from argus.patch.deploy import deploy_patched_modules, in_place_enabled
+
+        if in_place_enabled():
+            deploy_info = deploy_patched_modules(module_outs, primary=path)
+        else:
+            p_out = Path(primary_out)
+            if p_out.parent.name == ".argus-work":
+                deploy_info = deploy_patched_modules(module_outs, primary=path)
+                if deploy_info.get("ok"):
+                    native_out = p_out.parent.parent / p_out.name
+                    if native_out.is_file():
+                        primary_out = str(native_out)
+                        module_outs[path] = primary_out
+            else:
+                try:
+                    shutil.copy2(primary_out, Path(path).resolve())
+                    primary_out = str(Path(path).resolve())
+                    module_outs[path] = primary_out
+                except Exception:
+                    pass
 
     certificate = certify_apply_plan(applied, verify)
     verification_level = level_from_verify(verify).value
@@ -822,5 +899,6 @@ def apply_plan(
             "modules": list(module_outs.keys()),
             "plan_source": plan_source,
             "slice_plan_len": len(slice_plan),
+            "deploy": deploy_info,
         },
     }
