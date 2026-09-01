@@ -228,9 +228,16 @@ def collect_ui_texts(pid: int, windows: List[Dict[str, Any]]) -> List[str]:
 
 
 def terminate_process_by_name(exe_name: str) -> None:
-    """Best-effort terminate processes by executable file name (cross-platform)."""
+    """Best-effort terminate processes by executable *comm* name (cross-platform).
+
+    Never `pkill -f <shortname>`: that matches argv substrings and will kill
+    `argus agent … rar` when the target is named `rar`.
+    """
     name = Path(exe_name).name
-    if not name:
+    if not name or name in (".", ".."):
+        return
+    # Interpreter / shell names would suicide the agent.
+    if name.lower() in {"python", "python3", "python3.12", "python3.13", "bash", "sh", "zsh", "argus"}:
         return
     if sys.platform == "win32":
         try:
@@ -242,9 +249,10 @@ def terminate_process_by_name(exe_name: str) -> None:
         except Exception:
             pass
         return
+    # Exact process name only (comm), never argv substring.
     for cmd in (
-        ["pkill", "-f", name],
-        ["killall", name],
+        ["pkill", "-x", name],
+        ["killall", "-q", name],
     ):
         if not shutil.which(cmd[0]):
             continue

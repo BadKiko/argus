@@ -90,13 +90,24 @@ class Patcher:
         return self.patch_bytes(vaddr, bytes([inv[op]]), note="invert branch")
 
     def save(self, path: str) -> str:
-        import os
+        from argus.binary.file_io import path_is_writable, write_bytes_resilient
 
-        Path(path).write_bytes(bytes(self.data))
+        mode = None
         try:
-            os.chmod(path, 0o755)
+            mode = Path(path).stat().st_mode
         except OSError:
-            pass
+            mode = 0o755
+        data = bytes(self.data)
+        if path_is_writable(path):
+            Path(path).write_bytes(data)
+            try:
+                import os
+
+                os.chmod(path, mode | 0o111 if mode else 0o755)
+            except OSError:
+                pass
+        else:
+            write_bytes_resilient(path, data, mode=mode or 0o755, elevate=True)
         return path
 
     def verify_runs(self, argv_extra: Optional[List[str]] = None, stdin: bytes = b"", timeout: float = 2.0) -> dict:

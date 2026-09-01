@@ -12,7 +12,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from argus.binary.file_io import copy_binary_resilient
 
@@ -174,7 +174,9 @@ def launch_env_for(binary: str | Path) -> tuple[str, dict[str, str]]:
     """
     p = Path(binary).resolve()
     cwd = str(p.parent)
+    work_dir: Optional[str] = None
     if p.parent.name == ".argus-work":
+        work_dir = str(p.parent)
         cwd = str(p.parent.parent)
 
     install: Optional[str] = None
@@ -192,7 +194,10 @@ def launch_env_for(binary: str | Path) -> tuple[str, dict[str, str]]:
     if not install:
         install = str(install_dir_for(p))
 
-    search_dirs = [cwd]
+    search_dirs: List[str] = []
+    if work_dir:
+        search_dirs.append(work_dir)
+    search_dirs.append(cwd)
     for cand in (install, extra_install):
         if cand and cand not in search_dirs:
             search_dirs.append(cand)
@@ -330,3 +335,42 @@ def stage_native_executable(
     dest = shadow / exe_name
     copy_binary_resilient(src, dest, fallback_src=original)
     return StagedLaunch(path=dest, cwd=str(shadow), ephemeral=False)
+
+
+def write_install_launcher(
+    install_root: Path | str,
+    exe_name: str,
+    *,
+    launcher_name: str | None = None,
+) -> Path:
+    """
+    Write a wrapper next to the exe so bundled sibling .so/.dll resolve
+    (e.g. BCompare + lib7z.so). Linux: LD_LIBRARY_PATH; Windows: PATH + cwd.
+    """
+    root = Path(install_root).resolve()
+    exe = root / exe_name
+    if not exe.is_file():
+        raise FileNotFoundError(str(exe))
+    stem = Path(exe_name).stem
+    if os.name == "nt":
+        out = root / (launcher_name or f"run-{stem}.cmd")
+        out.write_text(
+            "@echo off\r\n"
+            f'set "ROOT=%~dp0"\r\n'
+            f'set "PATH=%ROOT%;%PATH%"\r\n'
+            f'cd /d "%ROOT%"\r\n'
+            f'"%ROOT%\\{exe_name}" %*\r\n',
+            encoding="utf-8",
+        )
+        return out
+    out = root / (launcher_name or f"run-{stem}.sh")
+    out.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'export LD_LIBRARY_PATH="${ROOT}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n'
+        f'exec "${{ROOT}}/{exe_name}" "$@"\n',
+        encoding="utf-8",
+    )
+    out.chmod(0o755)
+    return out

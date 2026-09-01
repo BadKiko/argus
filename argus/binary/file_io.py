@@ -62,6 +62,56 @@ def _copy_windows_shared_read(src: Path, dst: Path) -> None:
         kernel32.CloseHandle(handle)
 
 
+def path_is_writable(path: PathLike) -> bool:
+    p = Path(path)
+    if not p.exists():
+        return os.access(p.parent, os.W_OK)
+    return os.access(p, os.W_OK)
+
+
+def write_bytes_resilient(
+    path: PathLike,
+    data: bytes,
+    *,
+    mode: Optional[int] = None,
+    elevate: bool = True,
+) -> Path:
+    """Write bytes to path; on permission error optionally elevate via deploy helper."""
+    dp = Path(path)
+    dp.parent.mkdir(parents=True, exist_ok=True)
+    release_binary_lock(dp)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if sys.platform == "win32" and hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        fd = os.open(str(dp), flags, mode or 0o644)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        if mode is not None:
+            try:
+                dp.chmod(mode)
+            except OSError:
+                pass
+        return dp
+    except OSError as err:
+        if not elevate:
+            raise
+        import tempfile
+
+        from argus.patch.deploy import install_replace
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = Path(tmp.name)
+        r = install_replace(tmp_path, dp, elevate=True)
+        tmp_path.unlink(missing_ok=True)
+        if not r.ok:
+            raise OSError(f"elevated write failed: {r.detail}") from err
+        return dp
+
+
 def copy_binary_resilient(
     src: PathLike,
     dst: PathLike,
