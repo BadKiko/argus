@@ -51,15 +51,10 @@ def classify_task_intent(
 
     binary_signals = _binary_signals(binary) if binary else {}
 
-    # Crackme: authenticate + Welcome/Password strings, no license rodata
+    # Crackme only when the binary actually exports authenticate (fauxware-style).
+    # A "password" substring alone (archive checks, etc.) must not override license wording.
     if binary_signals.get("authenticate_symbol") and not binary_signals.get("license_strings"):
         if has_license_words or has_password_words or binary_signals.get("password_crackme"):
-            return TaskKind.PASSWORD
-
-    if binary_signals.get("password_crackme") and not binary_signals.get("license_strings"):
-        if has_license_words and not has_password_words:
-            return TaskKind.PASSWORD
-        if has_password_words or binary_signals.get("authenticate_symbol"):
             return TaskKind.PASSWORD
 
     if has_ui_words and not has_license_words:
@@ -117,16 +112,15 @@ def _binary_signals(path: Optional[str]) -> Dict[str, bool]:
         b"serial number",
         b"enter license",
     )
+    # Tight: archive/network "password" substrings (RarCheckPassword) are not crackmes.
     password_hits = (
-        b"password",
-        b"wrong",
-        b"welcome",
-        b"username",
+        b"wrong password",
+        b"enter password",
         b"go away",
     )
     out["license_strings"] = any(h in low for h in license_hits)
-    out["password_crackme"] = any(h in low for h in password_hits) and (
-        out["authenticate_symbol"] or b"password" in low
+    out["password_crackme"] = bool(out["authenticate_symbol"]) and (
+        any(h in low for h in password_hits) or b"password" in low
     )
     return out
 
@@ -218,19 +212,20 @@ def routing_hint(
     sig = task_signals(task_text, binary=binary, discover=discover)
     parts = [format_task_signals(task_text, binary=binary, discover=discover)]
     parts.append(
-        "RE workflow (examples): observe (find/xrefs/disasm) → hypothesize → "
-        "diagnose_failure(error_text=<verbatim from user or sandbox>) → "
-        "apply_plan(steps=<from evidence>) → verify."
+        "RE workflow: static find/atlas with task nouns → "
+        "diagnose_failure(error_text=<verbatim find preview>) → "
+        "apply_plan from corrective_patch → verify. Launch only if 0 string hits."
     )
     if sig.get("password", 0) > sig.get("gate_transform", 0):
         parts.append(
-            "Password-like signals: consider argus_ai, argus_solve, or authenticate xref — verify with behavior."
+            "Password-like signals (hint only): after observing the check, argus_ai/solve may recover a secret."
         )
     elif sig.get("patch_ui", 0) > 0.5:
         parts.append("UI-like signals: argus_find + argus_patch replace_string (new len ≤ old).")
     elif sig.get("gate_transform", 0) > 0.4:
         parts.append(
-            "Gate-like signals: find error text → diagnose_failure → small apply_plan batches from corrective_patch."
+            "Gate-like signals: find/atlas query= task nouns → diagnose_failure(error_text=hit preview) → apply_plan. "
+            "Do not freestyle argus_patch. Empty slice is not failure."
         )
     parts.append("Never invent addresses; error_text must be verbatim from user, sandbox, or find hits.")
     return "\n".join(parts)

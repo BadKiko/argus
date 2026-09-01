@@ -25,17 +25,21 @@ Rules:
 - MUST call tools; never invent results.
 - Address EVERY task; bind EVERY tool call with for_task=<id>.
 - Patch ONLY the work copy path.
-- Tools return observations + hints.suggested_tools — hints are ideas only; you choose the next experiment.
-- argus_apply_plan requires explicit steps= copied from slice/diagnose_failure/decision_flow evidence.
-- argus_diagnose_failure requires error_text= verbatim from user, sandbox, or find hits — never guess.
-- On verify failure: capture exact dialog text, then diagnose_failure → corrective apply_plan (small batches).
-- Verification is static (patch bytes + capstone disasm) unless behavior oracle requested.
+- Tools return observations + hints.suggested_tools — hints are ideas only, not the binary's architecture. You form hypotheses from evidence.
+- Static first: argus_find/atlas with user-task nouns (not the filename). On a hit, argus_diagnose_failure(error_text=verbatim preview), then argus_apply_plan. Do not argus_patch atlas jumps.
+- Empty slice is incomplete, not failure.
+- argus_exec is LAST RESORT when find/atlas return 0 hits. Never strings/readelf/nm.
+- A CRT/_start lift is not a solved check. argus_ai is not for gate bypass.
+- argus_apply_plan: omit steps= to use diagnose/slice plan, or copy suggested_batches[0]. Huge plans: first batch only.
+- argus_diagnose_failure requires error_text= verbatim from find hits, user, or sandbox — never guess.
+- CLI: verify stdout fragment. Do not argus_gui_oracle when there are no windows.
+- On verify failure: capture exact text, then diagnose_failure → apply_plan (small batches).
 - NEVER hardcode vendor addresses or one-off recipes — derive everything from tool evidence.
 """
 
 _DIAGNOSE_STOP_WORDS = frozenset({
     "сделай", "чтобы", "любой", "любая", "любое", "чтобы", "программа", "программу",
-    "make", "that", "with", "from", "this", "accept", "any", "key", "license",
+    "make", "that", "with", "from", "this", "accept", "any", "key",
 })
 
 # Max patch steps per apply_plan call (gate tasks).
@@ -62,6 +66,15 @@ def suggest_patch_batches(
         return {"full_plan": [], "suggested_batches": []}
     full = [dict(s) for s in plan]
     batches: List[Dict[str, Any]] = []
+    pred = focus_corrective_patch(plan)
+    if pred and any("validator" in str(s.get("taint_source") or "") for s in pred):
+        batches.append(
+            {
+                "label": "predicate_gates",
+                "steps": pred,
+                "rationale": "validator_return gates nearest the observed string — apply this first",
+            }
+        )
     hub = trim_patch_plan(plan, max_steps=1, exclude_addrs=exclude_addrs, hub_first=True)
     if hub:
         batches.append({"label": "hub_first", "steps": hub, "rationale": "single ret_imm hub"})
@@ -102,6 +115,9 @@ def trim_patch_plan(
 
     out: List[Dict[str, Any]] = []
 
+    def _taint(step: Dict[str, Any]) -> str:
+        return str(step.get("taint_source") or step.get("taint") or "").lower()
+
     if hub_first:
         for step in plan:
             if len(out) >= max_steps:
@@ -115,15 +131,30 @@ def trim_patch_plan(
             if max_steps == _FAST_HUB_BATCH:
                 return out
 
+    seen = {_addr_key(s) for s in out}
+    for step in plan:
+        if len(out) >= max_steps:
+            break
+        if step.get("kind") != "force_branch":
+            continue
+        if "validator" not in _taint(step):
+            continue
+        key = _addr_key(step)
+        if not key or key in exclude or key in seen:
+            continue
+        out.append(dict(step))
+        seen.add(key)
+
     for step in plan:
         if len(out) >= max_steps:
             break
         if step.get("kind") != "force_branch":
             continue
         key = _addr_key(step)
-        if not key or key in exclude:
+        if not key or key in exclude or key in seen:
             continue
         out.append(dict(step))
+        seen.add(key)
 
     if not out and hub_first:
         for step in plan:
@@ -134,6 +165,28 @@ def trim_patch_plan(
                 continue
             out.append(dict(step))
     return out[:max_steps]
+
+
+def focus_corrective_patch(
+    plan: List[Dict[str, Any]],
+    *,
+    wide_threshold: int = 12,
+    max_steps: int = 3,
+) -> List[Dict[str, Any]]:
+    """Narrow diagnose output: predicate gates near the sink, not every je in a parser."""
+    if not plan:
+        return []
+    val = [
+        dict(s)
+        for s in plan
+        if s.get("kind") == "force_branch"
+        and "validator" in str(s.get("taint_source") or s.get("taint") or "").lower()
+    ]
+    if val:
+        return val[:max_steps]
+    if len(plan) > wide_threshold:
+        return trim_patch_plan(plan, max_steps=max_steps)
+    return [dict(s) for s in plan]
 
 
 def extract_failure_context(payload: Dict[str, Any]) -> Dict[str, Any]:

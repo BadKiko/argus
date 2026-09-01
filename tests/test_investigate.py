@@ -15,6 +15,17 @@ SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 FAUXWARE = SAMPLES / "fauxware"
 
 
+def test_suggest_next_tool_gate_empty_plan_diagnoses():
+    tool, reason = suggest_next_tool(
+        intent=TaskKind.GATE_TRANSFORM,
+        analyze_ok=True,
+        find_ok=True,
+        slice_data={"patch_plan": []},
+    )
+    assert tool == "argus_diagnose_failure"
+    assert "error_text" in reason
+
+
 def test_suggest_next_tool_password():
     tool, reason = suggest_next_tool(
         intent=TaskKind.PASSWORD,
@@ -22,8 +33,19 @@ def test_suggest_next_tool_password():
         find_ok=True,
         slice_data={"patch_plan": []},
     )
-    assert tool == "argus_ai"
+    assert tool == "argus_atlas"
     assert reason
+    from argus.llm.investigate import rank_tool_suggestions
+
+    ranked = rank_tool_suggestions(
+        intent=TaskKind.PASSWORD,
+        analyze_ok=True,
+        find_ok=True,
+        slice_data={"patch_plan": []},
+    )
+    names = [x["tool"] for x in ranked]
+    assert names[0] == "argus_atlas"
+    assert "argus_ai" in names
 
 
 def test_suggest_next_tool_gate_with_plan():
@@ -44,6 +66,25 @@ def test_run_investigate_fauxware():
     assert d.get("observations")
     assert d.get("suggested_next_tool")
     assert d.get("analyze", {}).get("fmt") == "elf"
+
+
+@pytest.mark.skipif(not FAUXWARE.is_file(), reason="samples/fauxware missing")
+def test_run_investigate_does_not_inject_archetype_recipe():
+    d = run_investigate(
+        str(FAUXWARE),
+        "license",
+        task_text="Сделай чтобы проверка лицензии везде в программе возвращала True",
+    )
+    blob = json.dumps(d, ensure_ascii=False)
+    assert "archetype=" not in blob
+    assert "AppState" not in blob
+    assert "Global State Struct" not in blob
+    obs = " ".join(d.get("observations") or [])
+    assert "Hypothesis (unverified)" not in obs
+    ranked = (d.get("hints") or {}).get("suggested_tools") or []
+    names = [x.get("tool") for x in ranked]
+    assert "argus_atlas" in names
+    assert names[0] != "argus_ai"
 
 
 @pytest.mark.skipif(not FAUXWARE.is_file(), reason="samples/fauxware missing")

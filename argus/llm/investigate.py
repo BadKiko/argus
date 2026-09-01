@@ -48,20 +48,22 @@ def rank_tool_suggestions(
             return
         out.append({"tool": tool, "reason": reason, "confidence": round(confidence, 2)})
 
-    if intent == TaskKind.PASSWORD:
-        if "argus_ai" not in tried:
-            add("argus_ai", "password/crackme — NL solve", 0.75)
-        if "argus_solve" not in tried:
-            add("argus_solve", "symbolic/concolic path", 0.65)
-        if plan:
-            add("argus_apply_plan", "slice plan available — pass steps= from evidence", 0.55)
-        add("argus_research", "stuck — gather alternate strategy", 0.4)
-        return out
-
+    if "argus_atlas" not in tried:
+        add(
+            "argus_atlas",
+            "query= task nouns or an observed fragment, then string_addr= for the jump map (no patch)",
+            0.82 if not plan else 0.52,
+        )
+    if find_ok and not plan and intent != TaskKind.PASSWORD:
+        add(
+            "argus_diagnose_failure",
+            "error_text= verbatim top find/atlas preview, then apply_plan from corrective_patch",
+            0.93,
+        )
     if "argus_slice" not in tried:
-        add("argus_slice", "map strings→xrefs→gates (multi=true)", 0.8)
+        add("argus_slice", "map strings→xrefs→gates (multi=true); empty plan is incomplete, not failure", 0.55)
     if not plan and "argus_discover" not in tried:
-        add("argus_discover", "empty patch_plan — linked modules in install dir", 0.7)
+        add("argus_discover", "empty patch_plan — linked modules in install dir", 0.5)
     if not plan:
         add("argus_find", "try query= from user task wording", 0.65)
 
@@ -73,13 +75,19 @@ def rank_tool_suggestions(
         if plan:
             add("argus_apply_plan", "corrective steps from diagnose_failure", 0.6)
 
-    if plan and "argus_apply_plan" not in tried:
+    if plan and "argus_apply_plan" not in tried and intent != TaskKind.PASSWORD:
         if any(s.get("kind") == "force_branch" for s in plan):
             add("argus_decision_flow", "inspect gates before apply", 0.55)
         add("argus_apply_plan", f"patch_plan ready ({len(plan)} steps, confidence={conf})", 0.7)
 
     if find_ok and "argus_xrefs" not in tried:
         add("argus_xrefs", "inspect xrefs on top string hit", 0.6)
+
+    if intent == TaskKind.PASSWORD:
+        if "argus_ai" not in tried:
+            add("argus_ai", "only if the user asked to recover a password/secret", 0.5)
+        if "argus_solve" not in tried:
+            add("argus_solve", "symbolic path after the check is mapped", 0.45)
 
     add("argus_research", "gather more evidence or pivot module", 0.35)
     out.sort(key=lambda x: x.get("confidence", 0), reverse=True)
@@ -149,8 +157,20 @@ def run_investigate(
             + "; ".join(f"{h.get('addr')} {str(h.get('preview') or '')[:40]!r}" for h in hits[:3])
         )
     else:
-        observations.append("No strong string hits from find — binary may be stripped or query mismatch")
-        hypotheses.append("Try argus_slice with explicit query= from user task wording")
+        observations.append(
+            f"No string hits for query={find_q!r} — text may be constructed or query too generic"
+        )
+        hypotheses.append(
+            "Observe runtime once (CLI banner / UI dialog) and pass that verbatim fragment to "
+            "argus_atlas(query=) then argus_diagnose_failure(error_text=). Do not assume an architecture."
+        )
+
+    if hits:
+        preview = str(hits[0].get("preview") or "").strip().replace("\n", " ")[:80]
+        hypotheses.append(
+            f"Top hit is an observe fragment — argus_diagnose_failure(error_text={preview!r}), "
+            "then apply_plan. Do not freestyle argus_patch."
+        )
 
     stripped_like = bool(found.get("stripped_like"))
     if stripped_like:
@@ -186,7 +206,10 @@ def run_investigate(
         elif not plan and non_ui:
             hypotheses.append("Gates exist but no plan — inspect force_branch candidates via xrefs")
         elif not plan:
-            hypotheses.append("No gates in primary+linked — argus_discover then slice other candidates")
+            hypotheses.append(
+                "No gates near current query — diagnose_failure(error_text=find preview) "
+                "or atlas from that string. Empty slice is not failure."
+            )
 
     # --- xrefs on best hit ---
     if hits:
@@ -220,18 +243,12 @@ def run_investigate(
 
     if intent == TaskKind.GATE_TRANSFORM and slice_data.get("patch_plan"):
         hypotheses.append(
-            "Hypothesis (unverified): slice patch_plan may apply via argus_apply_plan(steps=...) — verify gates first"
+            "slice patch_plan is evidence only — inspect gates, then argus_apply_plan(steps= from that plan)"
         )
     if intent == TaskKind.PASSWORD:
-        hypotheses.append("Hypothesis (unverified): password path — argus_ai / argus_solve before gate apply_plan")
-
-    from argus.llm.archetypes import match_archetype
-
-    arch = match_archetype(
-        task_text or query,
-        has_multiple_gates=len(slice_data.get("patch_plan") or []) > 1,
-    )
-    observations.append(f"Hypothesis (unverified): archetype={arch.name} — {arch.recommended_strategy}")
+        hypotheses.append(
+            "Task looks like password recovery — map the check first; argus_ai/solve only to recover a secret"
+        )
 
     summary = (
         f"investigate {img.fmt}/{img.arch} plan={len(slice_data.get('patch_plan') or [])} "
@@ -240,11 +257,6 @@ def run_investigate(
     return {
         "ok": True,
         "summary": summary,
-        "archetype": {
-            "name": arch.name,
-            "category": arch.category,
-            "recommended_strategy": arch.recommended_strategy,
-        },
         "observations": observations,
         "hypotheses": hypotheses,
         "suggested_next_tool": next_tool,

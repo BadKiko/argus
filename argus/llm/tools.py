@@ -34,7 +34,7 @@ ARGUS_TOOLS: List[dict] = [
     openai_tool(
         "argus_investigate",
         "Investigation-first: analyze + find + gate_scan + xrefs in one call. "
-        "Returns observations[], hypotheses[], suggested_next_tool. "
+        "Returns observations[] (facts) and hypotheses[] (optional next experiments — not the architecture). "
         "Call at task start or when stuck before patching. Always pass for_task.",
         {
             "binary": {"type": "string", "description": "Work copy path"},
@@ -55,8 +55,8 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_ai",
-        "Natural-language solve/deobf/patch/lift. Prefer this for user intents like 'дай пароль'. "
-        "For bypass/remove check prefer argus_patch after argus_find. Always pass for_task.",
+        "Password/secret recovery only (e.g. 'дай пароль'). "
+        "Never for license/gate bypass — use find/atlas → diagnose_failure → apply_plan. Always pass for_task.",
         {
             "prompt": {"type": "string", "description": "RU/EN request"},
             "binary": {"type": "string", "description": "Path to ELF/PE"},
@@ -66,7 +66,8 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_analyze",
-        "Show binary format, arch, entry, symbols, detected protection. Pass for_task.",
+        "Show binary format, arch, entry, symbols, detected protection. Pass for_task. "
+        "Next: argus_find(query= task nouns), not lift of _start.",
         {"binary": {"type": "string"}},
         ["binary"],
     ),
@@ -78,8 +79,9 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_find",
-        "Find strings / gate_candidates / suggested_stubs. Pass for_task. "
-        "Prefer ui_label_only=false for logic patches. Runtime finalizes task status.",
+        "Find strings / gate_candidates. Pass for_task. query= nouns from the user task "
+        "(the check they named), not the product filename. On a hit: next tool is "
+        "argus_diagnose_failure(error_text=verbatim preview), not argus_patch.",
         {
             "binary": {"type": "string"},
             "query": {"type": "string", "description": "Extra keywords / phrase e.g. 'free version'"},
@@ -131,7 +133,8 @@ ARGUS_TOOLS: List[dict] = [
         "argus_patch",
         "Write a patched binary. Always pass for_task=<TASKS id>. "
         "replace_string: old=exact substring, new≤len(old). "
-        "For gate transforms prefer argus_slice then argus_apply_plan (not freestyle gates). "
+        "For gate transforms: NEVER freestyle force_branch/ret_imm — "
+        "argus_diagnose_failure then argus_apply_plan. "
         "Freestyle logic patch never completes gate-transform tasks. "
         "ETXTBSY: quit the running app. Never stub main/entry.",
         {
@@ -193,7 +196,8 @@ ARGUS_TOOLS: List[dict] = [
         "gate_candidates + patch_plan. Scans linked DLL/SO when multi=true; auto-widens to "
         "nearby binaries if primary has no plan. If still empty: pivot via argus_discover. "
         "Always call before apply_plan. Then argus_apply_plan. Pass for_task. "
-        "If patch_plan is empty: STOP — do not invent steps; pivot modules or use password path.",
+        "If patch_plan is empty: incomplete, not failure — find/atlas with task nouns, then "
+        "diagnose_failure(error_text=verbatim hit preview). Do not invent steps or argus_patch jumps.",
         {
             "binary": {"type": "string"},
             "query": {"type": "string", "description": "Optional extra phrase e.g. invalid license"},
@@ -267,6 +271,33 @@ ARGUS_TOOLS: List[dict] = [
         ["binary", "addr"],
     ),
     openai_tool(
+        "argus_atlas",
+        "Two-phase goal map (not a patcher). "
+        "(1) query= catalogs matching strings across the primary and linked ELF .so / PE .dll. "
+        "(2) string_addr= walks pointer tables, then calls forward to the check and callers backward "
+        "(every site, not just one). Always start with query=, then pick a string_addr. Always pass for_task.",
+        {
+            "binary": {"type": "string", "description": "Primary work-copy or install exe/ELF"},
+            "query": {
+                "type": "string",
+                "description": "Phase 1: error/UI fragment to search across all modules",
+            },
+            "string_addr": {
+                "type": "string",
+                "description": "Phase 2: VA from strings[].addr (hex). Builds the jump/table map from that string.",
+            },
+            "module": {
+                "type": "string",
+                "description": "Optional filename to restrict the scan (e.g. BCompare or foo.dll)",
+            },
+            "max_modules": {
+                "type": "integer",
+                "description": "Max extra SO/DLL to scan (default 8)",
+            },
+        },
+        ["binary"],
+    ),
+    openai_tool(
         "argus_decision_flow",
         "Build a compact Semantic Decision Graph (CDG / Decision Tree) for a function, string, or address. "
         "Shows the cause-and-effect flow slice connecting entry, validator calls, decision gates, error sinks, and success paths in <500 tokens. "
@@ -317,9 +348,8 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_state_flags",
-        "Scan executable sections for global AppState struct boolean invariants (e.g. is_licensed, is_admin, trial_flag). "
-        "Finds fields accessed as [reg + offset] across multiple functions and locates their writer sites (setcc/mov) "
-        "to enable a single global patch that unlocks the whole program. Always pass for_task.",
+        "Optional: scan for a byte/bit tested as [reg+off] in many functions, and list writer sites. "
+        "Use only if disasm already shows the same struct offset checked in several places — not a default license strategy.",
         {
             "binary": {"type": "string", "description": "Work copy path"},
             "min_reads": {
@@ -331,10 +361,9 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_gui_oracle",
-        "GUI launch oracle (observe only — NO keyboard input). Stages exe into install dir, "
-        "launches with native cwd/PATH/LD_LIBRARY_PATH, checks: no crash, no generic error modal, "
-        "reject_texts not visible when GUI introspection is available (Win32 / Linux wmctrl|xdotool). "
-        "Headless Linux: process-alive check only. Does NOT prove license key acceptance. Always pass for_task.",
+        "GUI launch oracle for windowed apps only (observe — NO keyboard). "
+        "Do NOT call for CLI/console binaries — verify via stdout with the same reject fragment. "
+        "Does NOT prove license key acceptance. Always pass for_task.",
         {
             "binary": {"type": "string", "description": "Patched work copy path"},
             "cwd": {"type": "string", "description": "Optional override launch cwd (default: resolved install dir)"},
@@ -370,25 +399,28 @@ ARGUS_TOOLS: List[dict] = [
     ),
     openai_tool(
         "argus_exec",
-        "Run custom Python code or shell commands when built-in Argus tools are insufficient. "
-        "Use this to write custom analysis/patching scripts, inspect binary structures, solve complex crypto, "
-        "or download/install external utilities (pip/curl). Runs in the binary's workspace with full access to "
-        "Python libraries (argus, capstone, pefile, z3, numpy). Always pass for_task.",
+        "LAST RESORT only — after argus_find / argus_atlas / argus_analyze / argus_disasm cannot answer. "
+        "Typical use: run the TARGET binary once and capture stdout/stderr (a banner or error line). "
+        "Do NOT reinvent strings/readelf/nm/objdump/gdb, do not pip/curl, do not patch from here. "
+        "Shell is off unless ARGUS_EXEC_SHELL=1. Always pass for_task.",
         {
             "binary": {"type": "string", "description": "Work copy path"},
-            "code": {"type": "string", "description": "Python script code or shell command line to run"},
+            "code": {
+                "type": "string",
+                "description": "Python: subprocess the target binary, or a tiny probe no Argus tool covers",
+            },
             "language": {
                 "type": "string",
                 "enum": ["python", "shell"],
-                "description": "Execution language: 'python' (default) or 'shell' (sh/cmd)",
+                "description": "python (default). shell requires ARGUS_EXEC_SHELL=1",
             },
             "save_as": {
                 "type": "string",
-                "description": "Optional relative filename to persist the script in the workspace (e.g. 'custom_solve.py')",
+                "description": "Optional relative filename to persist the script in the workspace",
             },
             "timeout": {
                 "type": "integer",
-                "description": "Execution timeout in seconds (default 30, max 120)",
+                "description": "Timeout seconds (default 30, max 180)",
             },
         },
         ["binary", "code"],
@@ -439,10 +471,18 @@ def _truncate(obj: Any, limit: int = 16000) -> str:
         "applied",
         "suggested_stubs",
         "gate_symbols",
+        "jumps",
+        "strings",
+        "hops",
+        "modules",
+        "observations",
+        "callers",
+        "edges",
     ):
         if key in slim:
             if isinstance(slim[key], list):
-                slim[key] = slim[key][:3]
+                cap = 40 if key == "jumps" else 12 if key in ("strings", "hops", "modules", "observations") else 3
+                slim[key] = slim[key][:cap]
             elif isinstance(slim[key], dict):
                 sub_sum = slim[key].get("summary")
                 slim[key] = {"summary": sub_sum} if sub_sum else {"truncated": True}
@@ -465,9 +505,23 @@ def _truncate(obj: Any, limit: int = 16000) -> str:
         "suggested_next_tool": slim.get("suggested_next_tool"),
         "limits": {"truncated": True, "original_chars": len(json.dumps(payload))},
     }
-    for keep in ("verify", "patched_path", "patched_paths", "sandbox", "plan_source", "applied"):
+    for keep in (
+        "verify",
+        "patched_path",
+        "patched_paths",
+        "sandbox",
+        "plan_source",
+        "applied",
+        "phase",
+        "string_addr",
+        "suggested_string_addr",
+        "query",
+    ):
         if keep in slim and slim[keep] is not None:
             minimal[keep] = slim[keep]
+    for keep_list, n in (("jumps", 40), ("strings", 16), ("hops", 8), ("observations", 16), ("callers", 12)):
+        if isinstance(slim.get(keep_list), list):
+            minimal[keep_list] = slim[keep_list][:n]
     if plan:
         minimal["patch_plan"] = plan
         minimal.setdefault("evidence", {})["patch_plan"] = plan
@@ -639,6 +693,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
         and name == "argus_apply_plan"
         and arguments.get("steps")
         and sess.last_patch_plan_len == 0
+        and not sess.verified_plans
     ):
         raw = _envelope(
             ok=False,
@@ -649,10 +704,76 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> str:
                 "slice_plan_len": 0,
             },
             verify={"kind": "patch_bytes", "ok": False, "detail": "steps not from patch_plan"},
-            next_hint="argus_slice must return non-empty patch_plan before apply_plan with steps=",
+            next_hint=(
+                "argus_diagnose_failure(error_text=verbatim find preview) then "
+                "argus_apply_plan without steps= (uses corrective_patch). Empty slice is not a reason to invent steps."
+            ),
             tool=name,
         )
         return _inject_task_fields(raw, for_task=for_task, warning=missing_task_warn)
+
+    if name == "argus_patch":
+        kind = (arguments.get("kind") or "").strip()
+        logic_kinds = {
+            "ret_imm",
+            "force_branch",
+            "skip_check",
+            "nop_bytes",
+            "always_true",
+            "always_false",
+            "nop_prompts",
+        }
+        need_plan_kinds = {"ret_imm", "force_branch", "nop_bytes", "skip_check"}
+        from argus.llm.session import has_session_plan, logic_patch_count, note_logic_patch_addr
+
+        addr_key = str(arguments.get("addr") or "").strip()
+        if kind in need_plan_kinds and logic_patch_count(addr_key) >= 2:
+            note_logic_patch_addr(addr_key)
+            raw = _envelope(
+                ok=False,
+                summary=f"blocked: same addr {addr_key or '?'} patched repeatedly — stop freestyle",
+                evidence={"error": "patch_loop", "addr": addr_key},
+                next_hint=(
+                    "argus_diagnose_failure(error_text=verbatim find/runtime preview) then "
+                    "argus_apply_plan from corrective_patch. Do not flip taken= on the same VA."
+                ),
+                tool=name,
+            )
+            return _inject_task_fields(raw, for_task=for_task, warning=missing_task_warn)
+        if kind in logic_kinds and sess.last_slice_patch_plan:
+            raw = _envelope(
+                ok=False,
+                summary=(
+                    "blocked: freestyle logic patch while session patch_plan exists "
+                    f"(plan_len={len(sess.last_slice_patch_plan)})"
+                ),
+                evidence={
+                    "error": "freestyle_blocked",
+                    "slice_plan_len": len(sess.last_slice_patch_plan),
+                    "hint_step": sess.last_slice_patch_plan[0],
+                },
+                verify={"kind": "patch_bytes", "ok": False, "detail": "use argus_apply_plan without steps="},
+                next_hint=(
+                    "argus_apply_plan with only binary= applies next batch from session slice plan. "
+                    "Do NOT argus_patch force_branch/ret_imm when patch_plan exists."
+                ),
+                tool=name,
+            )
+            return _inject_task_fields(raw, for_task=for_task, warning=missing_task_warn)
+        if kind in need_plan_kinds and not has_session_plan():
+            if addr_key:
+                note_logic_patch_addr(addr_key)
+            raw = _envelope(
+                ok=False,
+                summary="blocked: freestyle logic patch without diagnose/slice plan",
+                evidence={"error": "freestyle_blocked", "kind": kind, "addr": addr_key or None},
+                next_hint=(
+                    "argus_find/atlas with task nouns → argus_diagnose_failure(error_text=verbatim preview) "
+                    "→ argus_apply_plan. Do not invent force_branch polarity."
+                ),
+                tool=name,
+            )
+            return _inject_task_fields(raw, for_task=for_task, warning=missing_task_warn)
 
     try:
         raw = _dispatch_tool_inner(name, arguments)
@@ -730,7 +851,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             arguments["binary"],
             arguments.get("query") or "",
             original_binary=_sess.original_binary or None,
-            task_text=arguments.get("task") or arguments.get("query") or "",
+            task_text=arguments.get("task") or _sess.user_task_text or arguments.get("query") or "",
         )
         record_investigate(arguments["binary"], payload)
         slice_d = payload.get("slice") or {}
@@ -760,7 +881,6 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             extra={
                 "patch_plan": patch_plan,
                 "plan_source": "slice",
-                "archetype": payload.get("archetype"),
                 "intent": payload.get("intent"),
             },
         )
@@ -814,7 +934,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 "protection": prot.to_dict(),
                 "functions": funcs,
             },
-            next_hint="observe with argus_find(query=...) or argus_investigate — do not invent function roles",
+            next_hint="argus_find(query= task nouns) or argus_investigate — then diagnose_failure on a hit preview, do not lift _start",
             fmt=img.fmt,
             arch=img.arch,
             entry=hex(img.entry),
@@ -1143,16 +1263,27 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             f"plan={len(patch_plan)} gates={len(d.get('gate_candidates') or [])}",
             f"session_ready={'yes' if patch_plan else 'no'} — argus_apply_plan without steps= applies batch",
         ]
+        if not patch_plan:
+            slice_obs.append(
+                "empty patch_plan — incomplete, not failure; "
+                "argus_find/atlas with task nouns → diagnose_failure(error_text=hit preview)"
+            )
         if previews and previews[0].get("disasm"):
             slice_obs.append(
                 "primary disasm: " + " | ".join(previews[0]["disasm"][:2])
             )
         hints = _batch_hints(patch_plan, dict(d.get("hints") or {}))
+        slice_ok = bool(d.get("ok", True))
+        empty_hint = (
+            "empty patch_plan is incomplete, not failure — "
+            "argus_find/atlas query= task nouns, then argus_diagnose_failure(error_text=verbatim preview)"
+        )
         return _truncate(
             {
-                "ok": True,
+                "ok": slice_ok,
                 "summary": d.get("summary"),
-                "next_hint": d.get("next_hint"),
+                "next_hint": d.get("next_hint") if patch_plan else empty_hint,
+                "next_errors": ([] if patch_plan else [empty_hint]),
                 "modules": d.get("modules") or [binary],
                 "pivoted": d.get("pivoted"),
                 "widened_from": d.get("widened_from") or [],
@@ -1173,7 +1304,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                     "pivoted": d.get("pivoted"),
                     "reject_ui_candidates": d.get("reject_ui_candidates") or [],
                 },
-                "verify": {"kind": "none", "ok": None},
+                "verify": {"kind": "patch_plan", "ok": bool(patch_plan), "detail": f"plan_steps={len(patch_plan)}"},
             },
             limit=14000,
         )
@@ -1338,6 +1469,52 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             disassembly=disasm_text,
         )
 
+    if name == "argus_atlas":
+        from argus.atlas import build_atlas
+
+        d = build_atlas(
+            arguments["binary"],
+            arguments.get("query") or "",
+            string_addr=arguments.get("string_addr") or arguments.get("addr"),
+            module=arguments.get("module"),
+            max_modules=int(arguments.get("max_modules") or 8),
+        )
+        return _truncate(
+            {
+                "ok": bool(d.get("ok")),
+                "phase": d.get("phase"),
+                "summary": d.get("summary"),
+                "observations": d.get("observations") or [],
+                "next_hint": d.get("next_hint"),
+                "query": d.get("query"),
+                "string_addr": d.get("string_addr"),
+                "suggested_string_addr": d.get("suggested_string_addr"),
+                "primary": d.get("primary"),
+                "strings": d.get("strings") or [],
+                "callers": d.get("callers") or [],
+                "hops": d.get("hops") or [],
+                "jumps": d.get("jumps") or [],
+                "modules": d.get("modules") or [],
+                "evidence": {
+                    "phase": d.get("phase"),
+                    "hops": d.get("hops") or [],
+                    "module_names": [m.get("name") for m in (d.get("modules") or [])],
+                    "string_count": len(d.get("strings") or []),
+                    "jump_count": len(d.get("jumps") or []),
+                    "caller_sets": len(d.get("callers") or []),
+                    "suggested_string_addr": d.get("suggested_string_addr"),
+                },
+                "hints": {
+                    "suggested_tools": (
+                        ["argus_atlas"]
+                        if d.get("phase") == "strings"
+                        else ["argus_diagnose_failure", "argus_apply_plan"]
+                    )
+                },
+            },
+            limit=24000,
+        )
+
     if name == "argus_decision_flow":
         from argus.binary import load_binary
         from argus.flow import build_decision_flow
@@ -1385,6 +1562,24 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 ],
                 evidence={"error": "missing_needle"},
             )
+        error_text = str(arguments.get("error_text") or "")
+        if error_text.strip():
+            from argus.llm.session import get_session
+            from argus.llm.verification_hints import looks_post_patch_success_banner
+
+            if looks_post_patch_success_banner(error_text, get_session().tool_trace):
+                return _envelope(
+                    ok=False,
+                    summary=(
+                        "argus_diagnose_failure refused: this text appeared only after a patch "
+                        "(current/success banner, not the original reject). Stop diagnosing it."
+                    ),
+                    evidence={"error": "post_patch_banner"},
+                    next_hint=(
+                        "If the original reject fragment is gone from stdout/GUI, the task is done. "
+                        "Do not diagnose the new banner; do not start research."
+                    ),
+                )
         from argus.binary import load_binary
         from argus.flow import diagnose_failure
 
@@ -1396,9 +1591,12 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
             last_patch_addr=arguments.get("last_patch_addr"),
         )
         if diag.get("corrective_patch"):
+            from argus.llm.autopilot import focus_corrective_patch, suggest_patch_batches
             from argus.llm.session import add_verified_plan_steps
 
-            add_verified_plan_steps(diag["corrective_patch"])
+            full_plan = list(diag["corrective_patch"] or [])
+            focused = focus_corrective_patch(full_plan)
+            add_verified_plan_steps(focused, replace=True)
         is_ok = bool(diag.get("ok")) and bool(diag.get("corrective_patch") or arguments.get("crash_code"))
         clean_diag = {k: v for k, v in diag.items() if k != "ok"}
         from argus.llm.autopilot import suggest_patch_batches
@@ -1406,19 +1604,33 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         batches = suggest_patch_batches(list(diag.get("corrective_patch") or []))
         from argus.llm.tool_result import ToolResult
 
+        n_full = len(diag.get("corrective_patch") or [])
+        n_focus = len(focused) if diag.get("corrective_patch") else 0
+        if n_full > n_focus:
+            apply_hint = (
+                f"plan has {n_full} steps (wide handler) — apply suggested_batches[0] "
+                f"({n_focus} predicate gates) via argus_apply_plan; do not apply every je "
+                "and do not argus_patch atlas jumps."
+            )
+        else:
+            apply_hint = str(diag.get("explanation") or "") + (
+                " Next: argus_apply_plan (omit steps=) then verify the same fragment."
+            )
+
         result = ToolResult(
             ok=is_ok,
             summary=str(diag.get("root_cause") or diag.get("symptom") or "failure diagnosis"),
             observations=[
                 str(diag.get("explanation") or "")[:200],
-                f"corrective_steps={len(diag.get('corrective_patch') or [])}",
+                f"corrective_steps={n_full} focused={n_focus}",
             ],
             evidence=clean_diag,
             hints={
                 "suggested_batches": batches.get("suggested_batches") or [],
                 "full_plan_len": len(batches.get("full_plan") or []),
+                "focused_plan": (focused if diag.get("corrective_patch") else []),
             },
-            next_hint=str(diag.get("explanation") or ""),
+            next_hint=apply_hint,
             extra={k: v for k, v in clean_diag.items() if k not in ("corrective_patch",)},
         )
         return _envelope(result=result)
@@ -1496,9 +1708,26 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
     if name == "argus_gui_oracle":
         from pathlib import Path
 
+        from argus.binary import load_binary
         from argus.patch.gui_oracle import observe_gui_launch
+        from argus.patch.safety import looks_windowed_gui
 
         binary = arguments["binary"]
+        try:
+            img = load_binary(binary)
+        except Exception:
+            img = None
+        if img is not None and not looks_windowed_gui(img):
+            return _envelope(
+                ok=False,
+                summary="gui_oracle skipped: binary looks CLI/console (no GUI toolkit imports)",
+                evidence={"error": "cli_not_gui", "fmt": getattr(img, "fmt", None)},
+                next_hint=(
+                    "CLI verify: run the work copy and pass the same reject/banner fragment "
+                    "from stdout to confirm it is gone. Do not call argus_gui_oracle again."
+                ),
+                verify={"kind": "gui_launch_oracle", "ok": False, "detail": "cli_not_gui", "ran": False},
+            )
         reject = arguments.get("reject_texts") or []
         if isinstance(reject, str):
             reject = [reject]
@@ -1563,6 +1792,7 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
 
     if name == "argus_exec":
         import os
+        import re
         import subprocess
         import sys
         import tempfile
@@ -1577,15 +1807,61 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
         timeout = min(max(int(arguments.get("timeout") or 30), 1), 180)
         save_as = arguments.get("save_as")
 
+        sess = get_session()
+        sess.exec_calls = int(getattr(sess, "exec_calls", 0) or 0) + 1
+
+        if os.environ.get("ARGUS_EXEC", "1").strip().lower() in ("0", "false", "no", "off"):
+            return _envelope(
+                ok=False,
+                summary="argus_exec disabled (ARGUS_EXEC=0) — use argus_find / argus_atlas / argus_analyze / argus_disasm",
+                evidence={"error": "exec_disabled"},
+                next_hint="Observe via atlas/find; do not shell out.",
+            )
+
+        try:
+            exec_max = int((os.environ.get("ARGUS_EXEC_MAX") or "3").strip() or "3")
+        except ValueError:
+            exec_max = 3
+        exec_max = max(0, min(exec_max, 20))
+        if sess.exec_calls > exec_max:
+            return _envelope(
+                ok=False,
+                summary=(
+                    f"argus_exec budget exhausted ({exec_max}/session) — last resort only. "
+                    "Pass a verbatim stdout fragment to argus_atlas(query=) / diagnose_failure."
+                ),
+                evidence={"error": "exec_budget", "exec_calls": sess.exec_calls, "exec_max": exec_max},
+                next_hint="argus_atlas(query=<observed banner or error line>), not more exec.",
+            )
+
+        # Reinventing RE CLIs / network / priv-esc — Argus already has tools for the first set.
+        _blocked = re.compile(
+            r"(?i)(?<![A-Za-z_])"
+            r"(strings|readelf|objdump|nm|gdb|strace|ltrace|hexdump|\bxxd\b|"
+            r"radare2|\br2\b|ghidra|pip3?|curl|wget|apt-get|sudo|chmod\s+\+x)"
+            r"(?![A-Za-z_])"
+        )
+        if _blocked.search(code or ""):
+            return _envelope(
+                ok=False,
+                summary=(
+                    "argus_exec refused: that CLI is not last-resort. "
+                    "strings/readelf/nm → argus_find / argus_atlas / argus_analyze / argus_disasm. "
+                    "Run the target binary once only to copy a banner into atlas."
+                ),
+                evidence={"error": "exec_replaced_tool"},
+                next_hint="argus_atlas(query=<verbatim runtime text>) or argus_find(query=).",
+            )
+
         shell_ok = os.environ.get("ARGUS_EXEC_SHELL", "").strip().lower() in ("1", "true", "yes")
         if lang != "python" and not shell_ok:
             return _envelope(
                 ok=False,
                 summary="argus_exec: only language=python allowed (set ARGUS_EXEC_SHELL=1 for shell)",
                 evidence={"error": "shell_disabled", "language": lang},
+                next_hint="Use language=python to subprocess the target, or use atlas/find.",
             )
 
-        sess = get_session()
         if sess.work_binary:
             exec_dir = exec_workspace_dir(sess.work_binary)
         else:
@@ -1648,6 +1924,10 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 stdout=stdout[:8000],
                 stderr=stderr[:4000],
                 returncode=rc,
+                next_hint=(
+                    "If this printed a banner/error, copy one verbatim line into "
+                    "argus_atlas(query=) — do not exec strings/readelf."
+                ),
             )
         except subprocess.TimeoutExpired:
             return _envelope(

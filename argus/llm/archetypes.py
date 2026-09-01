@@ -1,7 +1,8 @@
-"""Library of Reverse Engineering Archetypes (Few-Shot Pattern Recognition).
+"""Optional reverse-engineering archetypes (NOT auto-injected into the agent).
 
-Provides the agent with structured mental templates of common commercial and crackme
-protection architectures, allowing it to instantly categorize targets and choose the optimal bypass.
+Do not call match_archetype from investigate/agent — a keyword like "license" must not
+become "AppState bitfield" or "two-stage crypto" in the LLM context. The model forms
+hypotheses from tool evidence on the current binary.
 """
 
 from __future__ import annotations

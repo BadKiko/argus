@@ -84,7 +84,9 @@ def test_find_groot_suggested_stubs_if_present():
     names = [s["name"] for s in stubs]
     assert any(n.startswith("Is") and "License" in n for n in names)
     assert "LicenseCallback" not in "".join(names)
-    assert "suggested_stubs" in (data.get("next_hint") or "") or "PREFERRED" in (data.get("next_hint") or "")
+    assert "suggested_stubs" in (data.get("next_hint") or "") or "PREFERRED" in (
+        data.get("next_hint") or ""
+    ) or "diagnose_failure" in (data.get("next_hint") or "")
 
 
 def test_dispatch_argus_find_envelope():
@@ -97,6 +99,9 @@ def test_dispatch_argus_find_envelope():
 
 
 def test_dispatch_patch_always_true_writes_file(tmp_path):
+    from argus.llm.session import reset_session
+
+    reset_session()
     src = SAMPLES / "fauxware"
     out = tmp_path / "fauxware.patched"
     raw = dispatch_tool(

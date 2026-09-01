@@ -16,6 +16,7 @@ def test_tools_schema_nonempty():
     assert len(ARGUS_TOOLS) >= 5
     names = {t["function"]["name"] for t in ARGUS_TOOLS}
     assert "argus_ai" in names and "argus_solve" in names
+    assert "argus_atlas" in names
 
 
 def test_dispatch_argus_ai_password():
@@ -54,6 +55,10 @@ def test_resolve_provider(monkeypatch):
 
 
 def test_dispatch_argus_exec(tmp_path, monkeypatch):
+    from argus.llm.session import reset_session
+
+    reset_session()
+    monkeypatch.setenv("ARGUS_EXEC_MAX", "10")
     # Test python execution
     res1 = json.loads(dispatch_tool("argus_exec", {"binary": "", "code": "print('ARGUS_EXEC_OK')"}))
     assert res1.get("ok") is True
@@ -83,6 +88,24 @@ def test_dispatch_argus_exec(tmp_path, monkeypatch):
     )
     assert res4.get("ok") is True
     assert "SHELL_EXEC_OK" in res4.get("stdout", "")
+
+
+def test_argus_exec_refuses_reinvented_re_cli(monkeypatch):
+    from argus.llm.session import reset_session
+
+    reset_session()
+    monkeypatch.setenv("ARGUS_EXEC_MAX", "5")
+    res = json.loads(
+        dispatch_tool(
+            "argus_exec",
+            {
+                "binary": "",
+                "code": "import subprocess\nsubprocess.run(['strings', '/tmp/x'])\n",
+            },
+        )
+    )
+    assert res.get("ok") is False
+    assert (res.get("evidence") or {}).get("error") == "exec_replaced_tool"
 
 
 def test_dispatch_argus_disasm():
@@ -161,3 +184,40 @@ def test_dispatch_argus_sandbox_test():
         )
     )
     assert "safe" in res
+
+
+def test_diagnose_refuses_post_patch_success_banner():
+    from argus.llm.session import get_session, reset_session
+
+    reset_session()
+    reject = "Trial version. Type rar -? for help"
+    success = "Registered to Alice"
+    get_session().tool_trace = [
+        {
+            "tool": "argus_exec",
+            "result": {"ok": True, "stdout": reject, "evidence": {"stdout": reject}},
+        },
+        {
+            "tool": "argus_apply_plan",
+            "result": {
+                "ok": False,
+                "applied": [{"ok": True, "addr": "0x1000"}],
+            },
+        },
+        {
+            "tool": "argus_exec",
+            "result": {"ok": True, "stdout": success, "evidence": {"stdout": success}},
+        },
+    ]
+    res = json.loads(
+        dispatch_tool(
+            "argus_diagnose_failure",
+            {
+                "binary": str(SAMPLES / "fauxware"),
+                "error_text": "Registered to %s",
+                "for_task": 1,
+            },
+        )
+    )
+    assert res.get("ok") is False
+    assert (res.get("evidence") or {}).get("error") == "post_patch_banner"

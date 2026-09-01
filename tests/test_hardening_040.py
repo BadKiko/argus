@@ -91,6 +91,57 @@ def test_exec_no_password_done_finalize():
     assert statuses[0].status != "done"
 
 
+def test_find_gate_query_hints_diagnose():
+    from argus.find import find_in_binary
+    from argus.llm.session import reset_session, get_session
+
+    reset_session()
+    get_session().user_task_text = "убери проверку лицензии"
+    path = str(SAMPLES / "fauxware")
+    data = find_in_binary(path, "password")
+    assert "diagnose_failure" in (data.get("next_hint") or "")
+    assert "argus_patch kind=" not in (data.get("next_hint") or "")
+
+
+def test_empty_slice_does_not_fail_license_task():
+    from argus.llm.tasks import _evaluate_tasks, split_user_tasks
+
+    tasks = split_user_tasks("убери лицензию")
+    trace = [
+        {
+            "tool": "argus_slice",
+            "args": {"for_task": 1},
+            "result": {
+                "ok": False,
+                "for_task": 1,
+                "summary": "gate_scan_modules modules=1 gates=0 plan=0",
+                "patch_plan": [],
+            },
+        }
+    ]
+    statuses = _evaluate_tasks(tasks, trace)
+    assert statuses[0].status != "failed"
+
+
+def test_exec_refusal_does_not_fail_license_task():
+    from argus.llm.tasks import _evaluate_tasks, split_user_tasks
+
+    tasks = split_user_tasks("убери лицензию")
+    trace = [
+        {
+            "tool": "argus_exec",
+            "args": {"for_task": 1},
+            "result": {
+                "ok": False,
+                "for_task": 1,
+                "summary": "argus_exec: only language=python allowed",
+            },
+        }
+    ]
+    statuses = _evaluate_tasks(tasks, trace)
+    assert statuses[0].status != "failed"
+
+
 def test_composite_requires_positive_oracle():
     bytes_v = {"ok": True, "kind": "patch_bytes"}
     beh = {"ran": True, "ok": True, "needs_oracle": True}
@@ -196,6 +247,20 @@ def test_trim_patch_plan_hub_first():
     assert len(batch) == 1
     assert batch[0]["kind"] == "ret_imm"
     assert batch[0]["addr"] == "0x200"
+
+
+def test_trim_patch_plan_prefers_validator_taint():
+    from argus.llm.autopilot import focus_corrective_patch, trim_patch_plan
+
+    plan = [
+        {"kind": "force_branch", "addr": "0x1", "taint_source": "struct_field_state"},
+        {"kind": "force_branch", "addr": "0x2", "taint_source": "validator_return (sub_x)"},
+        {"kind": "force_branch", "addr": "0x3", "taint_source": "struct_field_state"},
+    ]
+    batch = trim_patch_plan(plan, max_steps=1)
+    assert batch[0]["addr"] == "0x2"
+    focused = focus_corrective_patch(plan)
+    assert [s["addr"] for s in focused] == ["0x2"]
 
 
 def test_extract_failure_modal_title():

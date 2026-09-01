@@ -57,7 +57,8 @@ def retrieve_hints(
     if not hints:
         return ""
     lines = [
-        "Prior experience (similar cases — investigation paths, not ground truth):",
+        "Prior experience (OTHER binaries — investigation paths, not this program's architecture):",
+        "If THIS binary has 0 string hits / 0 gates, ignore unlock_apply paths; observe a runtime fragment first.",
     ]
     for h in hints[:5]:
         score = h.get("score", 0)

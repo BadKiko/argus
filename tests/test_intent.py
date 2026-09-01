@@ -24,6 +24,15 @@ def test_license_prompt_routes_unlock():
     assert kind == TaskKind.GATE_TRANSFORM
 
 
+def test_license_russian_true_everywhere_is_gate_not_password():
+    kind = classify_task_intent(
+        "Сделай чтобы проверка лицензии везде в программе возвращала True"
+    )
+    assert kind == TaskKind.GATE_TRANSFORM
+    hint = routing_hint("Сделай чтобы проверка лицензии везде в программе возвращала True")
+    assert "argus_ai" not in hint.lower()
+
+
 def test_ui_replace_routes_patch():
     kind = classify_task_intent("replace title string in window")
     assert kind == TaskKind.PATCH_UI
