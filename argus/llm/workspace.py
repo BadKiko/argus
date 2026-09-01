@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Agent workspace: never mutate the user's original binary."""
+"""Agent workspace: in-place patch with original/ backup (default) or legacy .argus-work copy."""
 
 import hashlib
 import os
@@ -42,12 +42,20 @@ def work_dir_for(original: Path) -> Path:
 
 def prepare_work_binary(original: str) -> Tuple[str, str]:
     """
-    Copy original into a writable work dir (local .argus-work or ~/.cache/argus/workspaces).
+    Default (in_place): backup original -> <install>/original/, patch native path.
+    Legacy (ARGUS_PATCH_MODE=workspace): copy into .argus-work / cache mirror.
     Returns (work_path, original_resolved).
     """
+    from argus.patch.deploy import ensure_original_backup, in_place_enabled
+
     orig = Path(original).resolve()
     if not orig.is_file():
         raise FileNotFoundError(str(orig))
+
+    if in_place_enabled():
+        ensure_original_backup(orig)
+        return str(orig), str(orig)
+
     work_dir = work_dir_for(orig)
     work = (work_dir / orig.name).resolve()
     if not work.is_file() or orig.stat().st_mtime > work.stat().st_mtime:
@@ -82,7 +90,11 @@ def is_same_file(a: Optional[str], b: Optional[str]) -> bool:
 
 
 def default_patch_output(work_binary: str) -> str:
+    from argus.patch.deploy import in_place_enabled
+
     p = Path(work_binary)
+    if in_place_enabled():
+        return str(p.resolve())
     stem = p.name
     while stem.endswith(".patched"):
         stem = stem[: -len(".patched")]
@@ -103,7 +115,10 @@ def resolve_work_binary_path(
     orig = Path(original_binary)
     if p.is_file():
         return str(p.resolve())
-    # Only remap workspace-ish paths — not arbitrary missing absolute paths.
+    if is_same_file(str(work), str(orig)):
+        if p.name in (work.name, orig.name) and work.is_file():
+            return str(work.resolve())
+        return str(val)
     if p.is_absolute() and p.name not in (work.name, orig.name) and not p.name.endswith(".patched"):
         return str(val)
     candidates = [
@@ -122,12 +137,64 @@ def resolve_work_binary_path(
     return str(val)
 
 
+def _is_allowed_install_target(path: Path, original_binary: str) -> bool:
+    """In-place mode: allow writes to primary binary and install siblings (not arbitrary paths)."""
+    from argus.patch.deploy import in_place_enabled, is_under_original
+
+    if not in_place_enabled() or is_under_original(path):
+        return False
+    orig = _resolve(original_binary)
+    if orig is None:
+        return False
+    install = orig.parent
+    try:
+        if not path.is_relative_to(install):
+            return False
+    except (AttributeError, ValueError):
+        if not str(path).startswith(str(install) + os.sep):
+            return False
+    name = path.name.lower()
+    if name.startswith(".argus") or name.startswith(".sandbox_"):
+        return False
+    if path.parent.name == "original":
+        return False
+    return True
+
+
 def rewrite_tool_paths(arguments: Dict[str, Any], *, work_binary: str, original_binary: str) -> Dict[str, Any]:
-    """Route tool I/O to the work copy; block writes to the original."""
+    """Route tool I/O to work copy; in-place mode keeps native install paths."""
+    from argus.patch.deploy import in_place_enabled
+
     args = dict(arguments)
     work = _resolve(work_binary)
     orig = _resolve(original_binary)
     if work is None or orig is None:
+        return args
+
+    if in_place_enabled() and is_same_file(str(work), str(orig)):
+        for key in ("binary", "module"):
+            val = args.get(key)
+            if not val:
+                continue
+            p = _resolve(str(val))
+            if p is None:
+                continue
+            try:
+                if p.samefile(orig):
+                    args[key] = str(orig)
+            except OSError:
+                if p == orig:
+                    args[key] = str(orig)
+        out = args.get("output")
+        if out:
+            po = _resolve(str(out))
+            if po is not None:
+                try:
+                    if po.samefile(orig):
+                        args["output"] = str(orig)
+                except OSError:
+                    if po == orig:
+                        args["output"] = str(orig)
         return args
 
     for key in ("binary", "module"):
@@ -163,7 +230,11 @@ def rewrite_tool_paths(arguments: Dict[str, Any], *, work_binary: str, original_
 
 
 def assert_not_original_target(path: Optional[str], original_binary: str) -> Optional[str]:
-    """Return error message if path is the original binary (write target)."""
+    """Return error if path is the original binary when workspace-only mode is active."""
+    from argus.patch.deploy import in_place_enabled
+
+    if in_place_enabled():
+        return None
     if not path or not original_binary:
         return None
     if is_same_file(path, original_binary):
@@ -175,12 +246,16 @@ def assert_not_original_target(path: Optional[str], original_binary: str) -> Opt
 
 
 def assert_not_install_write(path: Optional[str], original_binary: str) -> Optional[str]:
-    """Refuse writes into the install directory (except workspace subdirs)."""
+    """Refuse writes into install dir except allowed targets (in-place) or workspace subdirs."""
+    from argus.patch.deploy import in_place_enabled
+
     if not path or not original_binary:
         return None
     p = _resolve(path)
     orig = _resolve(original_binary)
     if p is None or orig is None:
+        return None
+    if in_place_enabled() and _is_allowed_install_target(p, original_binary):
         return None
     if is_same_file(str(p), original_binary):
         return assert_not_original_target(str(p), original_binary)
@@ -194,7 +269,7 @@ def assert_not_install_write(path: Optional[str], original_binary: str) -> Optio
                 return None
             return (
                 f"refused: cannot write into install directory ({install}) — "
-                "use workspace cache or .argus-work"
+                "use workspace cache, .argus-work, or in-place mode"
             )
     except (AttributeError, ValueError):
         if str(p).startswith(str(install) + os.sep):
@@ -203,8 +278,13 @@ def assert_not_install_write(path: Optional[str], original_binary: str) -> Optio
 
 
 def exec_workspace_dir(work_binary: str) -> Path:
-    """Writable directory for argus_exec scripts (never install dir)."""
+    """Writable directory for argus_exec scripts."""
+    from argus.patch.deploy import in_place_enabled, install_root_for
+
     work = Path(work_binary).resolve()
-    d = work.parent / ".argus-exec"
+    if in_place_enabled():
+        d = install_root_for(work) / ".argus-exec"
+    else:
+        d = work.parent / ".argus-exec"
     d.mkdir(parents=True, exist_ok=True)
     return d
