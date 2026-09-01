@@ -201,6 +201,10 @@ def open_tasks_hint(tasks: List[UserTask], tool_trace: List[Dict[str, Any]]) -> 
     for s in statuses:
         if s.status != "done":
             lines.append(f"  {s.task.id}: {s.status} — {s.detail}")
+    lines.append(
+        "Workflow: find/atlas with task nouns → diagnose_failure(error_text=verbatim hit) → "
+        "apply_plan. Empty slice is not failure. CLI: stdout, not gui_oracle. Do not freestyle argus_patch."
+    )
     return "\n".join(lines)
 
 
@@ -268,7 +272,44 @@ def _bytes_ok_from_apply(payload: Dict[str, Any]) -> bool:
     if pb.get("ok") is True:
         return True
     applied = payload.get("applied") or []
-    return bool(applied) and all(a.get("ok") for a in applied)
+    if not applied:
+        return False
+    if all(a.get("ok") for a in applied):
+        return True
+    return any(isinstance(a, dict) and a.get("ok") for a in applied)
+
+
+def _binary_looks_cli(binary: Optional[str]) -> bool:
+    if not binary:
+        return False
+    try:
+        from argus.binary import load_binary
+        from argus.patch.safety import looks_windowed_gui
+
+        return not looks_windowed_gui(load_binary(binary))
+    except Exception:
+        return False
+
+
+def _apply_plan_credits_patch(
+    payload: Dict[str, Any],
+    tool_trace: List[Dict[str, Any]],
+    *,
+    task_id: int,
+    gate_task: bool,
+) -> Tuple[bool, str]:
+    """True when apply_plan landed diagnose/slice bytes even if envelope ok=false."""
+    if not _bytes_ok_from_apply(payload) and not _patch_verify_ok(payload, gate_task=gate_task):
+        return False, ""
+    plan_ok = _plan_sourced_apply(payload)
+    had_slice_plan, _ = _slice_plan_in_trace(tool_trace, task_id=task_id)
+    ps = payload.get("plan_source") or (payload.get("evidence") or {}).get("plan_source")
+    had_diagnose_plan = plan_ok and ps == "diagnose"
+    if not plan_ok or not (had_slice_plan or had_diagnose_plan):
+        return False, ""
+    if _patch_verify_ok(payload, gate_task=gate_task) or _bytes_ok_from_apply(payload):
+        return True, "diagnose patch bytes applied"
+    return False, ""
 
 
 def _patch_verify_ok(payload: Dict[str, Any], *, gate_task: bool = False) -> bool:
@@ -421,19 +462,32 @@ def _binary_from_trace(tool_trace: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def _password_answer(payload: Dict[str, Any]) -> Optional[str]:
+    want = str(payload.get("want") or (payload.get("evidence") or {}).get("want") or "")
+    if want in ("lift", "patch", "deobf"):
+        return None
+
+    def _secret(text: str) -> Optional[str]:
+        t = text.strip()
+        if not t:
+            return None
+        low = t.lower()
+        if low.startswith("lifted ") or low.startswith("/* argus lift"):
+            return None
+        return t
+
     for key in ("answer", "stdin", "password"):
         val = payload.get(key)
         if val:
-            text = str(val).strip()
-            if text:
-                return text
+            got = _secret(str(val))
+            if got:
+                return got
     evidence = payload.get("evidence") or {}
     for key in ("stdin", "password"):
         val = evidence.get(key)
         if val:
-            text = str(val).strip()
-            if text:
-                return text
+            got = _secret(str(val))
+            if got:
+                return got
     return None
 
 
@@ -532,10 +586,34 @@ def _evaluate_tasks(
             weak = bool(evidence.get("weak_ui_xref"))
 
             if ok is False:
+                if entry.get("tool") == "argus_exec":
+                    # Probe / policy refusal — not a solved-or-failed gate outcome.
+                    last_ok_detail = summary or "exec skipped"
+                    continue
+                if entry.get("tool") == "argus_slice":
+                    last_ok_detail = summary or "empty slice — diagnose from find hit"
+                    continue
+                if entry.get("tool") == "argus_gui_oracle":
+                    last_ok_detail = summary or "gui oracle skipped"
+                    continue
+                err = str((payload.get("evidence") or {}).get("error") or "")
+                if entry.get("tool") == "argus_patch" and err in (
+                    "freestyle_blocked",
+                    "patch_loop",
+                ):
+                    last_ok_detail = summary or err
+                    continue
+                if _is_apply_plan(entry):
+                    credited, credit_detail = _apply_plan_credits_patch(
+                        payload, tool_trace, task_id=t.id, gate_task=gate_task
+                    )
+                    if credited:
+                        had_patch_ok = True
+                        last_ok_detail = credit_detail or "diagnose patch bytes applied"
+                        continue
+                    had_patch_fail = True
                 had_fail = True
                 fail_detail = summary or str(payload.get("error") or "tool failed")
-                if _is_apply_plan(entry):
-                    had_patch_fail = True
                 continue
 
             if ok is not True:
@@ -648,9 +726,24 @@ def _evaluate_tasks(
                 )
                 continue
 
-        if gate_task and had_patch_ok:
-            from argus.llm.verification_hints import gate_outcome_verified
+        from argus.llm.verification_hints import cli_reject_cleared, gate_outcome_verified
 
+        cli_ok, cli_detail = cli_reject_cleared(tool_trace)
+        if gate_task and cli_ok:
+            out.append(
+                _emit_task_status(
+                    t,
+                    "done",
+                    cli_detail or last_ok_detail or "CLI reject fragment gone from stdout",
+                    evs,
+                    tool_trace,
+                    binary=binary,
+                    had_logic_patch=had_attempted_logic,
+                )
+            )
+            continue
+
+        if gate_task and had_patch_ok:
             outcome_ok, outcome_detail = gate_outcome_verified(tool_trace, t.text)
             if had_gui_oracle_ok and outcome_ok:
                 out.append(
@@ -677,12 +770,17 @@ def _evaluate_tasks(
                     )
                 )
                 continue
+            need = (
+                last_ok_detail
+                + " — need argus_exec showing the same reject fragment gone from stdout"
+            )
+            if not _binary_looks_cli(binary):
+                need += " or argus_gui_oracle(reject_texts=...) on patched binary"
             out.append(
                 _emit_task_status(
                     t,
                     "incomplete",
-                    last_ok_detail
-                    + " — need argus_gui_oracle(reject_texts=...) on patched binary",
+                    need,
                     evs,
                     tool_trace,
                     binary=binary,
@@ -704,7 +802,14 @@ def _evaluate_tasks(
             if had_attempted_logic and not had_patch_ok:
                 detail = detail or "freestyle logic patch — not patch_plan; use argus_slice + apply_plan"
             if not had_gui_oracle_ok:
-                detail = (detail + "; then argus_gui_oracle on patched exe").strip("; ")
+                if _binary_looks_cli(binary):
+                    extra = "then argus_exec showing reject fragment gone from stdout"
+                else:
+                    extra = (
+                        "then argus_gui_oracle on patched exe or "
+                        "argus_exec showing reject fragment gone from stdout"
+                    )
+                detail = (detail + "; " + extra).strip("; ")
             out.append(
                 _emit_task_status(
                     t,

@@ -189,3 +189,25 @@ def test_finalize_absurd_no_tools_incomplete():
     assert r.ok is False
     assert r.task_statuses[0]["status"] == "incomplete"
     assert "нет tool evidence" in r.answer
+
+
+def test_finalize_license_not_done_from_crt_lift():
+    tasks = split_user_tasks("Сделай чтобы проверка лицензии везде в программе возвращала True")
+    r = finalize_agent(
+        tasks,
+        [
+            {
+                "tool": "argus_ai",
+                "args": {"for_task": 1},
+                "result": {
+                    "ok": True,
+                    "want": "lift",
+                    "answer": "lifted sub_4045b0 (4 blocks, confidence=low)",
+                    "summary": "lifted sub_4045b0 (4 blocks, confidence=low)",
+                    "evidence": {"want": "lift"},
+                },
+            }
+        ],
+        store_memory=False,
+    )
+    assert r.task_statuses[0]["status"] != "done"

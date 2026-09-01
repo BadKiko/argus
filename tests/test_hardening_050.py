@@ -271,6 +271,39 @@ def test_gate_task_requires_gui_oracle():
     assert "gui_oracle" in statuses[0].detail.lower()
 
 
+def test_gate_task_apply_envelope_fail_still_needs_oracle():
+    from argus.llm.tasks import _evaluate_tasks, split_user_tasks
+
+    tasks = split_user_tasks("remove license check")
+    trace = [
+        {
+            "tool": "argus_diagnose_failure",
+            "args": {"for_task": 1},
+            "result": {
+                "ok": True,
+                "for_task": 1,
+                "corrective_patch": [{"kind": "force_branch", "addr": "0x1000", "taken": False}],
+            },
+        },
+        {
+            "tool": "argus_apply_plan",
+            "args": {"for_task": 1},
+            "result": {
+                "ok": False,
+                "for_task": 1,
+                "plan_source": "diagnose",
+                "applied": [{"ok": True, "addr": "0x1000", "before": "74", "after": "90"}],
+                "verify": {"ok": False, "kind": "patch_bytes", "patch_bytes": {"ok": False}},
+            },
+        },
+    ]
+    statuses = _evaluate_tasks(tasks, trace)
+    assert statuses[0].status == "incomplete"
+    detail = statuses[0].detail.lower()
+    assert "gui_oracle" in detail or "stdout" in detail
+    assert "tool failed" not in detail
+
+
 def test_gate_task_done_with_patch_and_gui_oracle():
     from argus.llm.tasks import _evaluate_tasks, split_user_tasks
 
@@ -389,4 +422,5 @@ def test_terminate_process_by_name_linux(monkeypatch):
     monkeypatch.setattr("argus.behavior.shutil.which", lambda name: name if name == "pkill" else None)
     monkeypatch.setattr("argus.behavior.subprocess.run", fake_run)
     terminate_process_by_name("myapp.bin")
-    assert calls and calls[0][0] == "pkill"
+    assert calls and calls[0] == ["pkill", "-x", "myapp.bin"]
+    assert all("-f" not in c for c in calls)

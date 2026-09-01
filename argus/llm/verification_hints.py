@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -43,9 +44,23 @@ def _parse_result(entry: Dict[str, Any]) -> Dict[str, Any]:
     raw = entry.get("result")
     if isinstance(raw, dict):
         return raw
+    if isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
     preview = entry.get("result_preview") or entry.get("result_json")
     if isinstance(preview, dict):
         return preview
+    if isinstance(preview, str) and preview.strip().startswith("{"):
+        try:
+            parsed = json.loads(preview)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
     return {}
 
 
@@ -54,7 +69,7 @@ def patch_addrs_from_trace(tool_trace: List[Dict[str, Any]]) -> Set[int]:
     for entry in tool_trace:
         tool = entry.get("tool") or ""
         payload = _parse_result(entry)
-        if tool == "argus_apply_plan" and payload.get("ok"):
+        if tool == "argus_apply_plan":
             for row in payload.get("applied") or []:
                 if row.get("ok"):
                     a = _parse_addr(row.get("addr"))
@@ -176,10 +191,112 @@ def verification_gap_hint(
     return "\n".join(lines)
 
 
+def _needle_in(haystack: str, needle: str) -> bool:
+    n = (needle or "").lower().strip()
+    t = (haystack or "").lower()
+    if len(n) < 8 or not t:
+        return False
+    if n in t:
+        return True
+    head = n.split("%")[0].strip(" :\t")
+    return len(head) >= 8 and head in t
+
+
+def _exec_stdouts(tool_trace: List[Dict[str, Any]]) -> List[Tuple[int, str]]:
+    out: List[Tuple[int, str]] = []
+    for i, entry in enumerate(tool_trace):
+        if entry.get("tool") != "argus_exec":
+            continue
+        payload = _parse_result(entry)
+        stdout = str(
+            (payload.get("evidence") or {}).get("stdout")
+            or payload.get("stdout")
+            or ""
+        )
+        if stdout.strip():
+            out.append((i, stdout))
+    return out
+
+
+def _diagnose_needles(tool_trace: List[Dict[str, Any]]) -> List[str]:
+    needles: List[str] = []
+    seen: Set[str] = set()
+    for entry in tool_trace:
+        if entry.get("tool") != "argus_diagnose_failure":
+            continue
+        et = str((entry.get("args") or {}).get("error_text") or "").strip()
+        if len(et) < 8:
+            continue
+        key = et.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        needles.append(et)
+    return needles
+
+
+def _apply_indices_with_bytes(tool_trace: List[Dict[str, Any]]) -> List[int]:
+    idxs: List[int] = []
+    for i, entry in enumerate(tool_trace):
+        if entry.get("tool") != "argus_apply_plan":
+            continue
+        payload = _parse_result(entry)
+        applied = payload.get("applied") or []
+        if any(isinstance(a, dict) and a.get("ok") for a in applied) or payload.get("ok") is True:
+            idxs.append(i)
+    return idxs
+
+
+def cli_reject_cleared(tool_trace: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    """True when a diagnose reject fragment was in stdout before patch and gone after."""
+    needles = _diagnose_needles(tool_trace)
+    execs = _exec_stdouts(tool_trace)
+    applies = _apply_indices_with_bytes(tool_trace)
+    if not needles or not execs or not applies:
+        return False, ""
+    apply_i = applies[-1]
+    early = [(i, s) for i, s in execs if i <= apply_i]
+    late = [(i, s) for i, s in execs if i > apply_i]
+    if not early or not late:
+        return False, ""
+    last = late[-1][1]
+    for needle in needles:
+        frag = needle.strip()[:80]
+        if len(frag) < 8:
+            continue
+        if not any(_needle_in(s, frag) for _, s in early):
+            continue
+        if not _needle_in(last, frag):
+            return True, f"CLI reject {needle[:48]!r} gone from stdout after patch"
+    return False, ""
+
+
+def looks_post_patch_success_banner(error_text: str, tool_trace: List[Dict[str, Any]]) -> bool:
+    """True when error_text showed up in stdout only after a patch (new banner, not reject)."""
+    needle = (error_text or "").strip().lower()[:80]
+    if len(needle) < 8:
+        return False
+    execs = _exec_stdouts(tool_trace)
+    applies = _apply_indices_with_bytes(tool_trace)
+    if len(execs) < 2 or not applies:
+        return False
+    apply_i = applies[0]
+    early = [s for i, s in execs if i <= apply_i]
+    late = [s for i, s in execs if i > apply_i]
+    if not early or not late:
+        return False
+    if any(_needle_in(s, needle) for s in early):
+        return False
+    return any(_needle_in(s, needle) for s in late)
+
+
 def gate_outcome_verified(tool_trace: List[Dict[str, Any]], task_text: str) -> Tuple[bool, str]:
     """Stricter done gate for outcome-change tasks (actionable gaps only)."""
     if not task_requires_outcome_change(task_text):
         return True, ""
+    cli_ok, cli_detail = cli_reject_cleared(tool_trace)
+    if cli_ok:
+        return True, cli_detail
     cov = diagnose_coverage_detail(tool_trace)
     if cov:
         return False, f"patch_coverage_gap: {cov}"

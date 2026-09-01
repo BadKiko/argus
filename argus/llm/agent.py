@@ -12,23 +12,32 @@ from argus.llm.tools import ARGUS_TOOLS, dispatch_tool
 
 SYSTEM = """You are Argus Agent — a senior reverse-engineering assistant backed by the Argus binary toolkit.
 
-You are the planner. Tools execute atomic experiments and return observations + hints. Hints are suggestions — you decide what to run next.
+You are the planner. Tools return facts about THIS binary. Ranked tools, hypotheses, archetypes, and prior-experience paths are optional ideas — never the architecture of the program. Form your own hypotheses from evidence.
 
-Cognitive model (examples, not a fixed pipeline):
-1) Verification chain: user input → format check → validator → state flags → UI sinks. Patching only one stage may leave others failing.
-2) On error dialog after patch: argus_diagnose_failure(error_text=<verbatim UI text from user/sandbox/find>) → corrective_patch → argus_apply_plan(steps=...).
-3) On crash (e.g. 0xC0000005): argus_diagnose_failure(crash_code=..., last_patch_addr=...) — do not stub jump tables with ret_imm.
-4) Before manual patches: argus_disasm to verify instruction boundaries and branch polarity.
-5) GUI apps need install-dir context (sibling DLLs, Packages/) — patch ONLY the work copy path.
+Static observe first (do not launch yet):
+- argus_find / argus_atlas with nouns from the USER TASK (the check they named), not the product filename.
+- On a string hit: immediately argus_diagnose_failure(error_text=<verbatim hit preview>). That preview is the needle — do not invent a license/password/AppState architecture.
+- Then argus_apply_plan (omit steps= to use the diagnose plan, or copy suggested_batches[0]). Do NOT argus_patch force_branch/ret_imm from atlas jumps or xrefs.
+- If corrective_patch is huge: apply only the first suggested batch (predicate/validator_return gates near the string xref). Do not apply every je in a parser.
+- Empty slice/gate_scan is incomplete, not failure — still diagnose from the find hit.
+- argus_exec is LAST RESORT when find/atlas return 0 hits (text constructed at runtime). Never strings/readelf/nm/objdump/pip/curl.
+- Atlas maps; it does not patch. A CRT/_start lift is not the check.
+
+After a plan:
+- argus_diagnose_failure(error_text=<verbatim from find/user/sandbox>) uses the atlas caller-set.
+- apply suggested_batches then verify. One site is not enough if diagnose lists N callers.
+- On crash: diagnose_failure(crash_code=..., last_patch_addr=...) and roll back shared boot/init sites.
+- Before apply: argus_disasm on plan addrs for instruction boundaries and branch polarity (je taken often IS the reject path).
+- GUI apps: sibling DLL/SO via install dir; patch ONLY the work copy.
+- CLI/console binaries: verify via stdout/stderr with the same fragment. Do not call argus_gui_oracle when there are no windows.
+- argus_ai is for recovering a password/secret the user asked for — never for gate bypass.
 
 Rules:
 - MUST use tools; never invent results or addresses.
 - Address EVERY task; bind EVERY tool call with for_task=<id>.
-- argus_apply_plan: after argus_slice, omit steps= to apply cached patch_plan (batch size ARGUS_APPLY_BATCH, default 1). Or pass steps= from diagnose/decision_flow.
-- argus_diagnose_failure REQUIRES error_text= or crash_code= — never guess needles like "License".
-- Start with observe tools (find, xrefs, disasm, investigate) when the task is open-ended (color, behavior, UI, gates).
-- Verification tiers: EXECUTION_VERIFIED (process launches, no crash) < BEHAVIOR_VERIFIED (check/input outcome actually changed). Launch oracle never supplies validation input — idle UI without reject_text is NOT proof the check accepts arbitrary input.
-- If task requires changed validation outcome: argus_diagnose_failure → apply ALL corrective_patch sites (or disasm/error sinks) — patching one branch while diagnose still lists missing sites means incomplete.
+- argus_apply_plan: omit steps= to apply cached diagnose/slice plan (batch ARGUS_APPLY_BATCH, default 1). Or pass steps= from diagnose/decision_flow.
+- argus_diagnose_failure REQUIRES error_text= or crash_code= — never guess needles; use the find preview or a runtime line.
+- Verification tiers: EXECUTION_VERIFIED (process launches, no crash) < BEHAVIOR_VERIFIED (check/input outcome actually changed). Idle UI without reject_text is NOT proof the check accepts arbitrary input.
 - NEVER hardcode vendor addresses or one-off recipes — every addr/string from tool evidence on this binary.
 """
 
@@ -131,9 +140,11 @@ def _maybe_finalize_or_research(
     from argus.llm.research import build_research_brief, tasks_all_done
     from argus.llm.session import get_session, max_research_rounds
     from argus.llm.tasks import finalize_agent
+    from argus.llm.verification_hints import cli_reject_cleared
 
     mem_binary = original_binary or binary
-    if tasks_all_done(tasks, trace, binary=mem_binary):
+    cli_ok, _cli_detail = cli_reject_cleared(trace)
+    if tasks_all_done(tasks, trace, binary=mem_binary) or cli_ok:
         return (
             finalize_agent(
                 tasks,
@@ -537,6 +548,12 @@ def _run_agent_inner(
 
     tasks = split_user_tasks(user_prompt)
     tasks_block = format_tasks_block(tasks)
+    try:
+        from argus.llm.session import get_session
+
+        get_session().user_task_text = user_prompt
+    except Exception:
+        pass
     memory_hints = ""
     try:
         from argus.memory import maybe_warn_memory_usage, retrieve_hints
@@ -763,7 +780,10 @@ def _run_openai(
 
         hint = open_tasks_hint(tasks, trace)
         if _patch_loop_detected(trace):
-            hint += "\nNote: repeated patch on same address(es) in recent steps."
+            hint += (
+                "\nLOOP: same patch addr repeated — call argus_diagnose_failure"
+                "(error_text=verbatim find preview), then apply_plan. Do not flip taken=."
+            )
         if transcript is not None:
             transcript.user_message(step, hint, kind="open_tasks_hint")
         messages.append({"role": "user", "content": hint})
@@ -963,7 +983,10 @@ def _run_gemini(
             contents.append({"role": "user", "parts": fr_parts})
             hint = open_tasks_hint(tasks, trace)
             if _patch_loop_detected(trace):
-                hint += "\nNote: repeated patch on same address(es) in recent steps."
+                hint += (
+                "\nLOOP: same patch addr repeated — call argus_diagnose_failure"
+                "(error_text=verbatim find preview), then apply_plan. Do not flip taken=."
+            )
             if transcript is not None:
                 transcript.user_message(step, hint, kind="open_tasks_hint")
             contents.append({"role": "user", "parts": [{"text": hint}]})
