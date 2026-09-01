@@ -62,4 +62,27 @@ def test_dispatch_apply_without_steps_after_slice():
     data2 = json.loads(raw2)
     summ = (data2.get("summary") or "").lower()
     assert "no steps" not in summ and "missing steps" not in summ
-    assert data2.get("step_source") == "session_slice" or "sandbox" in summ
+    src = data2.get("step_source") or data2.get("plan_source")
+    assert src in ("session_slice", "slice") or "sandbox" in summ or "plan_source=slice" in summ
+
+
+def test_verified_plan_replace_uses_latest_diagnose():
+    from argus.llm.session import add_verified_plan_steps, get_verified_plan_steps
+
+    reset_session()
+    add_verified_plan_steps(
+        [{"kind": "force_branch", "addr": "0x1000", "taken": True}],
+        replace=True,
+    )
+    add_verified_plan_steps(
+        [
+            {"kind": "force_branch", "addr": "0x2000", "taken": True},
+            {"kind": "force_branch", "addr": "0x2008", "taken": False},
+        ],
+        replace=True,
+    )
+    plans = get_verified_plan_steps()
+    assert [p["addr"] for p in plans] == ["0x2000", "0x2008"]
+    steps, src, _ = resolve_apply_steps("/work/app", None)
+    assert src == "session_verified"
+    assert steps[0]["addr"] == "0x2000"

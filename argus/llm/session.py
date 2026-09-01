@@ -31,15 +31,19 @@ class SessionContext:
     original_binary: str = ""
     work_binary: str = ""
     install_dir: str = ""
+    deploy_backups: Dict[str, str] = field(default_factory=dict)
     research_round: int = 0
     last_investigate: Dict[str, Any] = field(default_factory=dict)
     tools_tried: List[str] = field(default_factory=list)
+    exec_calls: int = 0
     verified_plans: List[Dict[str, Any]] = field(default_factory=list)
     tool_trace: List[Dict[str, Any]] = field(default_factory=list)
     slice_repeat: int = 0
     last_slice_key: str = ""
     auto_pivot_done: bool = False
     gate_fast_path_done: bool = False
+    user_task_text: str = ""
+    logic_patch_counts: Dict[str, int] = field(default_factory=dict)
 
 
 def _default_apply_batch() -> int:
@@ -162,10 +166,15 @@ def reset_session(*, strict_plan: Optional[bool] = None) -> SessionContext:
     return _current
 
 
-def add_verified_plan_steps(steps: List[Dict[str, Any]]) -> None:
+def add_verified_plan_steps(steps: List[Dict[str, Any]], *, replace: bool = False) -> None:
+    """Record diagnose/slice plan. replace=True: latest diagnosis is the only session plan."""
     sess = get_session()
-    for s in steps:
-        if isinstance(s, dict) and s not in sess.verified_plans:
+    clean = [s for s in (steps or []) if isinstance(s, dict)]
+    if replace:
+        sess.verified_plans = list(clean)
+        return
+    for s in clean:
+        if s not in sess.verified_plans:
             sess.verified_plans.append(s)
 
 
@@ -227,6 +236,28 @@ def record_tool_call(name: str) -> None:
     sess = get_session()
     if name and name not in sess.tools_tried:
         sess.tools_tried.append(name)
+
+
+def note_logic_patch_addr(addr: Optional[str]) -> int:
+    """Count freestyle logic patches per VA; return new count."""
+    key = str(addr or "").strip().lower()
+    if not key:
+        return 0
+    sess = get_session()
+    sess.logic_patch_counts[key] = sess.logic_patch_counts.get(key, 0) + 1
+    return sess.logic_patch_counts[key]
+
+
+def logic_patch_count(addr: Optional[str]) -> int:
+    key = str(addr or "").strip().lower()
+    if not key:
+        return 0
+    return int(get_session().logic_patch_counts.get(key, 0))
+
+
+def has_session_plan() -> bool:
+    sess = get_session()
+    return bool(sess.last_slice_patch_plan) or bool(sess.verified_plans)
 
 
 def record_investigate(binary: str, payload: Dict[str, Any]) -> None:
