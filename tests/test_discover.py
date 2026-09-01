@@ -210,3 +210,50 @@ def test_siblings_linked_modules(tmp_path):
     assert d["primary"]
     linked_names = {Path(m["path"]).name for m in d.get("linked") or []}
     assert "helper.so" in linked_names
+
+
+def test_discover_explicit_binary_beats_sfx(tmp_path):
+    install = tmp_path / "rar"
+    install.mkdir()
+    main = install / "rar"
+    sfx = install / "default.sfx"
+    shutil.copy(SAMPLES / "fauxware", main)
+    shutil.copy(SAMPLES / "fauxware", sfx)
+    main.chmod(0o755)
+    sfx.chmod(0o755)
+    d = discover_targets("unlock license", root=str(install), binary=str(main))
+    assert Path(d["primary"]).resolve() == main.resolve()
+
+
+def test_discover_skips_original_backup_and_sfx_when_unnamed(tmp_path):
+    install = tmp_path / "rar"
+    install.mkdir()
+    main = install / "rar"
+    sfx = install / "default.sfx"
+    backup_dir = install / "original"
+    backup_dir.mkdir()
+    shutil.copy(SAMPLES / "fauxware", main)
+    shutil.copy(SAMPLES / "fauxware", sfx)
+    shutil.copy(SAMPLES / "fauxware", backup_dir / "rar")
+    main.chmod(0o755)
+    sfx.chmod(0o755)
+    (backup_dir / "rar").chmod(0o755)
+    d = discover_targets("unlock", root=str(install))
+    assert Path(d["primary"]).name == "rar"
+    paths = [c["path"] for c in d.get("candidates") or []]
+    assert not any(Path(p).parent.name == "original" for p in paths)
+
+
+def test_pick_primary_zero_score_skips_sfx(tmp_path):
+    from argus.discover import _pick_primary
+
+    install = tmp_path / "app"
+    install.mkdir()
+    sfx = install / "default.sfx"
+    main = install / "app"
+    sfx.write_bytes(b"\x7fELF" + b"\0" * 128)
+    main.write_bytes(b"\x7fELF" + b"\0" * 128)
+    sfx.chmod(0o755)
+    main.chmod(0o755)
+    ranked = [(0, sfx.resolve()), (0, main.resolve())]
+    assert _pick_primary(ranked).name == "app"

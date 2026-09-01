@@ -34,7 +34,8 @@ def test_pick_primary_keeps_clear_so_winner(tmp_path):
         (40, lib.resolve()),
         (2, app.resolve()),
     ]
-    assert _pick_primary(ranked).name == "libhelper.so"
+    # Sibling app executable still wins: license needles in a .so do not make it primary.
+    assert _pick_primary(ranked).name == "app"
 
 
 def test_transcript_writes_jsonl(tmp_path):

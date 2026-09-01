@@ -150,10 +150,16 @@ def scan_binaries(root: Path, *, max_depth: int = 2, limit: int = 40) -> List[Pa
         dirnames[:] = [
             d
             for d in dirnames
-            if d not in {".git", "node_modules", "__pycache__", ".venv", "venv"}
+            if d
+            not in {".git", "node_modules", "__pycache__", ".venv", "venv", ".argus-work"}
+            and d.lower() != "original"
         ]
         for name in filenames:
+            if is_patch_artifact(name):
+                continue
             fp = p / name
+            if _skip_discover_path(fp):
+                continue
             if is_binary_file(fp):
                 found.append(fp)
                 if len(found) >= limit:
@@ -234,6 +240,8 @@ def sibling_modules(primary: Path, *, limit: int = 24) -> List[Path]:
     for fp in sorted(parent.iterdir()):
         if not fp.is_file() or fp.resolve() == primary.resolve():
             continue
+        if is_patch_artifact(fp.name):
+            continue
         name = fp.name.lower()
         if not (name.endswith(".dll") or ".so" in name or name.endswith(".dylib")):
             continue
@@ -254,6 +262,8 @@ def sibling_binaries(primary: Path, *, limit: int = 40) -> List[Path]:
         return out
     for fp in sorted(parent.iterdir()):
         if not fp.is_file() or fp.resolve() == primary.resolve():
+            continue
+        if is_patch_artifact(fp.name):
             continue
         if _is_system_dep(fp.name):
             continue
@@ -390,12 +400,92 @@ def _is_library_name(name: str) -> bool:
     return n.startswith("lib") or ".so" in n or n.endswith((".dll", ".dylib"))
 
 
+def is_patch_artifact(name: str) -> bool:
+    """Skip prior patch outputs when discovering / slicing modules."""
+    low = (name or "").lower()
+    if low.endswith(".patched") or low.endswith("-patch"):
+        return True
+    if ".patched." in low or ".argus_smoke_" in low:
+        return True
+    return False
+
+
+def _is_stub_or_sfx(name: str) -> bool:
+    """SFX/stub payloads are not the main app when a real executable sits beside them."""
+    n = (name or "").lower()
+    return n.endswith(".sfx") or n.endswith(".stub")
+
+
+def _skip_discover_path(path: Path) -> bool:
+    from argus.patch.deploy import is_under_original
+
+    try:
+        return is_under_original(path) or is_patch_artifact(path.name)
+    except OSError:
+        return is_patch_artifact(path.name)
+
+
+def _is_app_executable(path: Path) -> bool:
+    if _is_library_name(path.name) or is_patch_artifact(path.name):
+        return False
+    try:
+        return os.access(path, os.X_OK) and is_binary_file(path)
+    except OSError:
+        return False
+
+
+def _install_dir_for_path(path: Path) -> Path:
+    if path.parent.name == ".argus-work":
+        return path.parent.parent
+    return path.parent
+
+
+def _executables_in_install(install: Path, *, limit: int = 24) -> List[Path]:
+    """Main executables directly in an install directory (not recursive /usr/lib)."""
+    out: List[Path] = []
+    if not install.is_dir():
+        return out
+    for fp in sorted(install.iterdir()):
+        if not fp.is_file():
+            continue
+        if is_patch_artifact(fp.name) or _skip_discover_path(fp):
+            continue
+        if _is_app_executable(fp):
+            out.append(fp.resolve())
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _prefer_dir_named_exe(apps: Sequence[Path]) -> Optional[Path]:
+    for p in apps:
+        parent = p.parent.name.lower()
+        stem = p.stem.lower()
+        if parent and (stem == parent or p.name.lower() == parent):
+            return p
+    return None
+
+
 def _pick_primary(ranked: Sequence[Tuple[int, Path]]) -> Optional[Path]:
     """Prefer main app binary over .so/.dll when license scores are close."""
+    ranked = [(sc, p) for sc, p in ranked if not _skip_discover_path(p)]
     if not ranked:
         return None
     top_score = ranked[0][0]
     if top_score <= 0:
+        apps = [
+            p
+            for _sc, p in ranked
+            if _is_app_executable(p) and not _is_stub_or_sfx(p.name)
+        ]
+        named = _prefer_dir_named_exe(apps)
+        if named is not None:
+            return named
+        if apps:
+            return apps[0]
+        for _sc, p in ranked:
+            if _is_app_executable(p):
+                return p
         return ranked[0][1]
     threshold = max(1, int(top_score * 0.85))
     pool = [(sc, p) for sc, p in ranked if sc >= threshold]
@@ -408,10 +498,25 @@ def _pick_primary(ranked: Sequence[Tuple[int, Path]]) -> Optional[Path]:
             app_like = os.access(p, os.X_OK) and not is_lib
         except OSError:
             app_like = False
-        return (1 if app_like else 0, sc, -1 if is_lib else 0, name.lower())
+        return (1 if app_like else 0, 0 if _is_stub_or_sfx(name) else 1, sc, -1 if is_lib else 0, name.lower())
 
     pool.sort(key=sort_key, reverse=True)
-    return pool[0][1]
+    if not any(_is_app_executable(p) for _sc, p in pool):
+        extras: List[Tuple[int, Path]] = []
+        install_dirs = {_install_dir_for_path(p) for _sc, p in pool}
+        for inst in install_dirs:
+            for fp in _executables_in_install(inst, limit=24):
+                sc = next((s for s, rp in ranked if rp == fp), 0)
+                extras.append((sc, fp))
+        if extras:
+            pool.extend(extras)
+            pool.sort(key=sort_key, reverse=True)
+    picked = pool[0][1]
+    if picked and _is_library_name(picked.name):
+        inst = _install_dir_for_path(picked)
+        for fp in _executables_in_install(inst, limit=24):
+            return fp
+    return picked
 
 
 def discover_targets(
@@ -460,6 +565,8 @@ def discover_targets(
             continue
         if not s.is_file() or not is_binary_file(s):
             continue
+        if _skip_discover_path(s):
+            continue
         seen.add(key)
         scored = signal_score(s)
         ranked.append((scored, s.resolve()))
@@ -475,6 +582,16 @@ def discover_targets(
         )
 
     picked = _pick_primary(ranked)
+    if binary:
+        expl = Path(binary)
+        if expl.is_file():
+            expl = resolve_link_base(binary, root).resolve()
+            if (
+                expl.is_file()
+                and not _is_library_name(expl.name)
+                and not is_patch_artifact(expl.name)
+            ):
+                picked = expl
     primary = str(picked) if picked else None
     linked: List[Dict[str, Any]] = []
     link_base = resolve_link_base(primary, root) if primary else None
@@ -496,7 +613,10 @@ def discover_targets(
         "candidates": candidates[:20],
         "linked": linked,
         "next_hint": (
-            f"Use binary={primary}; related modules listed in linked[] for argus_slice / apply_plan"
+            (
+                f"Use binary={primary} (main executable — patch ONLY work copy); "
+                f"gate logic may live in linked[] modules — argus_slice multi=true then apply_plan without steps="
+            )
             if primary
             else "No ELF/PE found — pass a path or run from a directory containing the binary"
         ),
