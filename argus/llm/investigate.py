@@ -48,48 +48,38 @@ def rank_tool_suggestions(
             return
         out.append({"tool": tool, "reason": reason, "confidence": round(confidence, 2)})
 
-    if "argus_atlas" not in tried:
+    def seen(*names: str) -> bool:
+        return any(n in tried for n in names)
+
+    if not seen("argus_find", "argus_atlas"):
         add(
-            "argus_atlas",
-            "query= task nouns or an observed fragment, then string_addr= for the jump map (no patch)",
+            "argus_find",
+            "query= task nouns or an observed fragment (string_addr= maps callers)",
             0.82 if not plan else 0.52,
         )
     if find_ok and not plan and intent != TaskKind.PASSWORD:
         add(
-            "argus_diagnose_failure",
-            "error_text= verbatim top find/atlas preview, then apply_plan from corrective_patch",
+            "argus_diagnose",
+            "error_text= verbatim top find preview, then argus_apply from that plan",
             0.93,
         )
-    if "argus_slice" not in tried:
-        add("argus_slice", "map strings→xrefs→gates (multi=true); empty plan is incomplete, not failure", 0.55)
-    if not plan and "argus_discover" not in tried:
-        add("argus_discover", "empty patch_plan — linked modules in install dir", 0.5)
+    if not seen("argus_look", "argus_discover") and not plan:
+        add("argus_look", "empty patch_plan — classify host vs payload, list siblings", 0.5)
     if not plan:
         add("argus_find", "try query= from user task wording", 0.65)
 
     if conf in ("low", "none", "unknown") and plan:
-        add("argus_slice", f"weak confidence={conf} — widen modules=", 0.6)
+        add("argus_diagnose", f"weak confidence={conf} — widen error_text or another module", 0.6)
 
     if verify_ok is False:
-        add("argus_diagnose_failure", "verify failed — error_text from sandbox/user verbatim", 0.85)
+        add("argus_diagnose", "verify failed — error_text from sandbox/user verbatim", 0.85)
         if plan:
-            add("argus_apply_plan", "corrective steps from diagnose_failure", 0.6)
+            add("argus_apply", "corrective steps from diagnose", 0.6)
 
-    if plan and "argus_apply_plan" not in tried and intent != TaskKind.PASSWORD:
-        if any(s.get("kind") == "force_branch" for s in plan):
-            add("argus_decision_flow", "inspect gates before apply", 0.55)
-        add("argus_apply_plan", f"patch_plan ready ({len(plan)} steps, confidence={conf})", 0.7)
+    if plan and not seen("argus_apply", "argus_apply_plan") and intent != TaskKind.PASSWORD:
+        add("argus_peek", "inspect gates before apply", 0.55)
+        add("argus_apply", f"patch_plan ready ({len(plan)} steps, confidence={conf})", 0.7)
 
-    if find_ok and "argus_xrefs" not in tried:
-        add("argus_xrefs", "inspect xrefs on top string hit", 0.6)
-
-    if intent == TaskKind.PASSWORD:
-        if "argus_ai" not in tried:
-            add("argus_ai", "only if the user asked to recover a password/secret", 0.5)
-        if "argus_solve" not in tried:
-            add("argus_solve", "symbolic path after the check is mapped", 0.45)
-
-    add("argus_research", "gather more evidence or pivot module", 0.35)
     out.sort(key=lambda x: x.get("confidence", 0), reverse=True)
     return out
 
@@ -113,9 +103,9 @@ def suggest_next_tool(
         verify_ok=verify_ok,
     )
     if not ranked:
-        return "argus_investigate", "no suggestions — run investigate"
+        return "argus_look", "no suggestions — argus_look then argus_find"
     top = ranked[0]
-    return str(top.get("tool") or "argus_investigate"), str(top.get("reason") or "")
+    return str(top.get("tool") or "argus_look"), str(top.get("reason") or "")
 
 
 def run_investigate(
@@ -162,14 +152,14 @@ def run_investigate(
         )
         hypotheses.append(
             "Observe runtime once (CLI banner / UI dialog) and pass that verbatim fragment to "
-            "argus_atlas(query=) then argus_diagnose_failure(error_text=). Do not assume an architecture."
+            "argus_find(query=) then argus_diagnose(error_text=). Do not assume an architecture."
         )
 
     if hits:
         preview = str(hits[0].get("preview") or "").strip().replace("\n", " ")[:80]
         hypotheses.append(
-            f"Top hit is an observe fragment — argus_diagnose_failure(error_text={preview!r}), "
-            "then apply_plan. Do not freestyle argus_patch."
+            f"Top hit is an observe fragment — argus_diagnose(error_text={preview!r}), "
+            "then argus_apply. Do not invent force_branch."
         )
 
     stripped_like = bool(found.get("stripped_like"))
@@ -207,8 +197,8 @@ def run_investigate(
             hypotheses.append("Gates exist but no plan — inspect force_branch candidates via xrefs")
         elif not plan:
             hypotheses.append(
-                "No gates near current query — diagnose_failure(error_text=find preview) "
-                "or atlas from that string. Empty slice is not failure."
+                "No gates near current query — argus_diagnose(error_text=find preview). "
+                "Empty diagnose is not failure."
             )
 
     # --- xrefs on best hit ---
@@ -238,16 +228,16 @@ def run_investigate(
         find_ok=bool(hits),
         slice_data=slice_data,
     )
-    next_tool = ranked[0]["tool"] if ranked else "argus_investigate"
+    next_tool = ranked[0]["tool"] if ranked else "argus_look"
     next_reason = ranked[0]["reason"] if ranked else "investigate"
 
     if intent == TaskKind.GATE_TRANSFORM and slice_data.get("patch_plan"):
         hypotheses.append(
-            "slice patch_plan is evidence only — inspect gates, then argus_apply_plan(steps= from that plan)"
+            "patch_plan is evidence only — inspect with argus_peek, then argus_apply (omit steps=)"
         )
     if intent == TaskKind.PASSWORD:
         hypotheses.append(
-            "Task looks like password recovery — map the check first; argus_ai/solve only to recover a secret"
+            "Task looks like password recovery — map the check with find/peek/run; do not invent the secret"
         )
 
     summary = (

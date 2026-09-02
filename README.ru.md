@@ -16,9 +16,11 @@
 | Аккуратно сменить поведение | `patch_plan` → apply → verify (байты + smoke) |
 | Решить crackme / пароль | Symbolic / concolic (`argus agent` / `solve`) |
 | Снять OLLVM-подобное CFF | Unflatten + опциональный патч + verify |
+| VMProtect / Themida | Detect → trace/unpack → lift → patch → verify (1.0.0) |
+| Denuvo-class anti-tamper | Runtime observe → lift защищённого модуля → behavior verify (1.0.0) |
 | Учиться на прошлых кейсах | Общая case memory (подсказки, не истина) |
 
-**Не цель (0.2.x):** полный unpack VMProtect/Themida «как коммерческий тул»; «100% на любом бинаре без подсказки».
+**Цель 1.0.0:** коммерческая защита (VMProtect, Themida, Denuvo) тем же агентным циклом, что и обычные бинари — observe, diagnose, apply, verify — без отдельного «кряк-only» пайплайна.
 
 ---
 
@@ -137,7 +139,7 @@ argus memory stats
 | `argus.binary` | Загрузчики ELF/PE |
 | `argus.disasm` | Capstone CFG |
 | `argus.symbolic` / `argus.concrete` | Z3 / Unicorn |
-| `argus.deobf` | CFF, MBA, частичный VMP |
+| `argus.deobf` | CFF, MBA, VMP/Themida/Denuvo (→ полный пайплайн в 1.0.0) |
 | `argus.prove` | Сертификаты / уровни верификации |
 | `argus.memory` | Клиент удалённой памяти кейсов |
 | `argus.ir` | Заготовка формат-агностичного IR |

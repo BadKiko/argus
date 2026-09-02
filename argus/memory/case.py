@@ -24,6 +24,30 @@ _ARGUS_TOOLS = {
     for t in ARGUS_TOOLS
     if isinstance(t, dict) and isinstance(t.get("function"), dict) and t["function"].get("name")
 }
+_ARGUS_TOOLS.update(
+    {
+        "argus_apply_plan",
+        "argus_diagnose_failure",
+        "argus_slice",
+        "argus_gui_oracle",
+        "argus_atlas",
+        "argus_disasm",
+        "argus_lift",
+        "argus_cfg",
+        "argus_ai",
+        "argus_deobf",
+        "argus_discover",
+        "argus_analyze",
+        "argus_investigate",
+        "argus_patch",
+        "argus_xrefs",
+        "argus_decision_flow",
+        "argus_research",
+        "argus_detect",
+        "argus_sandbox_test",
+        "argus_state_flags",
+    }
+)
 
 
 def _task_kinds(task: str) -> List[str]:

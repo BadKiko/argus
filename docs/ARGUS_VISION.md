@@ -43,6 +43,16 @@ Structured case memory: successes **and** failures, strategy scoring, RAG hints 
 
 **Unseen binary success rate** — generalize from past cases, not memorize one binary.
 
+## 1.0.0 — commercial protection
+
+First-class targets: **VMProtect**, **Themida**, **Denuvo-class** anti-tamper. Same agent contract as plain binaries:
+
+```
+observe (runtime / trace) → diagnose (lift behind VM) → apply → verify
+```
+
+Not a separate unpacker product — protection is another layer the agent composes tools through, with certificates at each step.
+
 ## Final principle
 
 > Don't teach the AI every binary. Teach it how to investigate, remember, choose the next experiment, transform, and prove correctness.

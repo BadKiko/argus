@@ -3,14 +3,14 @@ from __future__ import annotations
 """Protection detection heuristics (OLLVM / VMP / Themida / stripped)."""
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Sequence
 
 from argus.binary.image import BinaryImage
 
 
 @dataclass
 class ProtectionReport:
-    kind: str  # none|ollvm|vmp|themida|mixed|stripped|unknown
+    kind: str  # none|ollvm|vmp|themida|denuvo|mixed|stripped|unknown
     confidence: float
     indicators: List[str] = field(default_factory=list)
 
@@ -94,11 +94,29 @@ def _probe_cff_signal(image: BinaryImage) -> bool:
     return False
 
 
+def _denuvo_section_names(names: Sequence[str]) -> List[str]:
+    hits: List[str] = []
+    for n in names:
+        if n in (".bind", ".arch", ".srdata", ".boot"):
+            hits.append(f"denuvo section {n}")
+        elif n.startswith(".bind") or n.startswith(".arch"):
+            hits.append(f"denuvo-like section {n}")
+    return hits
+
+
 def detect_protection(image: BinaryImage) -> ProtectionReport:
     indicators: List[str] = []
-    scores = {"ollvm": 0.0, "vmp": 0.0, "themida": 0.0, "stripped": 0.0, "none": 0.1}
+    scores = {
+        "ollvm": 0.0,
+        "vmp": 0.0,
+        "themida": 0.0,
+        "denuvo": 0.0,
+        "stripped": 0.0,
+        "none": 0.1,
+    }
 
     names = [s.name.lower() for s in image.sections]
+    path_l = image.path.lower()
 
     # VMProtect
     if any(any(k in n for k in (".vmp", "vmp0", "vmp1")) for n in names):
@@ -110,11 +128,19 @@ def detect_protection(image: BinaryImage) -> ProtectionReport:
     ):
         scores["vmp"] += 0.2
 
+    # Denuvo Anti-Tamper (structural section names + toolchain markers)
+    denuvo_secs = _denuvo_section_names(names)
+    if denuvo_secs:
+        scores["denuvo"] += 0.45 * min(len(denuvo_secs), 3)
+        indicators.extend(denuvo_secs[:4])
+    if "denuvo" in path_l:
+        scores["denuvo"] += 0.35
+        indicators.append("filename denuvo")
+
     # Themida
     if any("themida" in n or "winlice" in n or ".themida" in n for n in names):
         scores["themida"] += 0.7
         indicators.append("themida section")
-    path_l = image.path.lower()
     if "themida" in path_l:
         scores["themida"] += 0.3
         indicators.append("filename themida")
@@ -160,13 +186,21 @@ def detect_protection(image: BinaryImage) -> ProtectionReport:
             scores["themida"] += 0.5
             indicators.append("Themida/Oreans string")
             break
+        if b"Denuvo" in chunk or b"denuvo" in chunk:
+            scores["denuvo"] += 0.55
+            indicators.append("Denuvo string")
+            break
 
+    commercial = {k: scores[k] for k in ("vmp", "themida", "denuvo") if scores[k] >= 0.25}
     kind = max(scores, key=scores.get)
     conf = scores[kind]
     if conf < 0.3:
         kind = "unknown" if indicators else "none"
         conf = 0.2 if indicators else 0.5
-    if scores["vmp"] >= 0.3 and scores["themida"] >= 0.3:
+    if len(commercial) >= 2:
         kind = "mixed"
-        conf = max(scores["vmp"], scores["themida"])
+        conf = max(commercial.values())
+    elif scores["denuvo"] >= 0.5 and scores["denuvo"] >= scores["vmp"] and scores["denuvo"] >= scores["themida"]:
+        kind = "denuvo"
+        conf = scores["denuvo"]
     return ProtectionReport(kind=kind, confidence=min(conf, 1.0), indicators=indicators[:20])

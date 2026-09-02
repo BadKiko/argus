@@ -96,6 +96,18 @@ def test_split_single_stays_one():
     assert "пароль" in tasks[0].text
 
 
+def test_split_drops_sdelay_preamble():
+    tasks = split_user_tasks(
+        "сделай чтобы любая проверка лицензии возвращала true "
+        "и чтобы никакие диалоги о trial не появлялись"
+    )
+    assert all("сделай" not in t.text.lower() or "чтобы" in t.text for t in tasks)
+    assert not any(t.text.strip().lower() == "сделай" for t in tasks)
+    one = split_user_tasks("Сделай чтобы проверка лицензии везде в программе возвращала True")
+    assert len(one) == 1
+    assert "проверка лицензии" in one[0].text
+
+
 def test_finalize_password_question_done():
     from argus.llm.tools import dispatch_tool
     import json

@@ -1030,10 +1030,22 @@ def diagnose_target(
     q = (error_text or "").strip()
     if q:
         payloads = list(brief.get("payloads") or []) or list_payload_modules(path)
+        if sniff_magic(path) in ("asar", "zip"):
+            primary = str(Path(path).resolve())
+            payloads = [{"path": primary, "kind": "archive"}] + [
+                r for r in payloads if str(Path(str(r.get("path") or "")).resolve()) != primary
+            ]
         for rec in payloads:
             mod = rec.get("path")
             if not mod or not Path(mod).is_file():
                 continue
+            if rec.get("kind") == "archive" or sniff_magic(mod) in ("asar", "zip"):
+                from argus.payload import scan_payload_strings
+
+                ranked = scan_payload_strings(mod, q, limit=8)
+                if not ranked:
+                    continue
+                return diagnose_text_module(mod, q, inner=ranked[0].get("inner"))
             try:
                 data = read_payload_bytes(mod)
             except OSError:
@@ -1041,17 +1053,7 @@ def diagnose_target(
             loc = locate_in_bytes(data, q)
             if not loc:
                 continue
-            inner = None
-            if rec.get("kind") == "archive" or sniff_magic(mod) in ("asar", "zip"):
-                from argus.payload import list_archive_entries
-
-                for ent in list_archive_entries(mod):
-                    off = int(ent.get("offset") or 0)
-                    size = int(ent.get("size") or 0)
-                    if off <= loc["addr"] < off + max(size, 1):
-                        inner = ent.get("inner")
-                        break
-            return diagnose_text_module(mod, q, inner=inner)
+            return diagnose_text_module(mod, q)
         magic = sniff_magic(path)
         if magic not in ("elf", "pe"):
             return diagnose_text_module(path, q)

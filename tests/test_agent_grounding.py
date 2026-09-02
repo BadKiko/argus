@@ -86,7 +86,7 @@ def test_find_groot_suggested_stubs_if_present():
     assert "LicenseCallback" not in "".join(names)
     assert "suggested_stubs" in (data.get("next_hint") or "") or "PREFERRED" in (
         data.get("next_hint") or ""
-    ) or "diagnose_failure" in (data.get("next_hint") or "")
+    ) or "argus_diagnose" in (data.get("next_hint") or "")
 
 
 def test_dispatch_argus_find_envelope():
@@ -123,12 +123,9 @@ def test_dispatch_patch_always_true_writes_file(tmp_path):
 def test_tools_include_find_and_new_patch_kinds():
     names = {t["function"]["name"] for t in ARGUS_TOOLS}
     assert "argus_find" in names
-    assert "argus_apply_plan" in names
-    assert "argus_slice" in names
-    patch = next(t for t in ARGUS_TOOLS if t["function"]["name"] == "argus_patch")
-    kinds = patch["function"]["parameters"]["properties"]["kind"]["enum"]
-    assert "nop_bytes" in kinds and "ret_imm" in kinds and "force_branch" in kinds
-    assert "gate_transform" not in kinds
+    assert "argus_apply" in names
+    assert "argus_diagnose" in names
+    assert "argus_patch" not in names
 
 
 def test_ask_ret_imm_and_default_patched_suffix(tmp_path):
@@ -230,16 +227,12 @@ def test_find_skips_zero_addr_symbols():
 
 def test_tools_include_xrefs():
     names = {t["function"]["name"] for t in ARGUS_TOOLS}
-    assert "argus_xrefs" in names
+    assert "argus_peek" in names
     assert "argus_find" in names
 
 
 def test_ret_imm_not_unlock_license_in_patch_kinds():
-    patch = next(t for t in ARGUS_TOOLS if t["function"]["name"] == "argus_patch")
-    kinds = patch["function"]["parameters"]["properties"]["kind"]["enum"]
-    assert "ret_imm" in kinds
-    assert "replace_string" in kinds
-    assert "gate_transform" not in kinds
+    assert "argus_patch" not in {t["function"]["name"] for t in ARGUS_TOOLS}
     assert not hasattr(PatchKind, "GATE_TRANSFORM")
 
 

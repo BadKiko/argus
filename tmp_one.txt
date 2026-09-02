@@ -1,0 +1,7 @@
+SO only: ok=True detail="GUI launch ok from install cwd (1 window(s)); hint 'BCompare' not matched" reject=[]
+SO+d30fdf: ok=False detail="reject_text visible: '30-day'" reject=['30-day']
+SO+d30fd2: ok=False detail="reject_text visible: '30-day'" reject=['30-day']
+SO+d30fd2+d30fdf: ok=False detail="reject_text visible: '30-day'" reject=['30-day']
+SO+ret114f680: ok=True detail='GUI launch ok from install cwd (1 window(s))' reject=[]
+SO+cb7770=0: ok=True detail="GUI launch ok from install cwd (1 window(s)); hint 'BCompare' not matched" reject=[]
+SO+d30fdf+114f680: ok=True detail='GUI launch ok from install cwd (1 window(s))' reject=[]

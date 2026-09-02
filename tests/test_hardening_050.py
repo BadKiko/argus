@@ -268,7 +268,7 @@ def test_gate_task_requires_gui_oracle():
     ]
     statuses = _evaluate_tasks(tasks, trace)
     assert statuses[0].status == "incomplete"
-    assert "gui_oracle" in statuses[0].detail.lower()
+    assert "reject_texts" in statuses[0].detail.lower() or "argus_run" in statuses[0].detail.lower()
 
 
 def test_gate_task_apply_envelope_fail_still_needs_oracle():
@@ -300,7 +300,7 @@ def test_gate_task_apply_envelope_fail_still_needs_oracle():
     statuses = _evaluate_tasks(tasks, trace)
     assert statuses[0].status == "incomplete"
     detail = statuses[0].detail.lower()
-    assert "gui_oracle" in detail or "stdout" in detail
+    assert "argus_run" in detail or "stdout" in detail or "reject_texts" in detail
     assert "tool failed" not in detail
 
 

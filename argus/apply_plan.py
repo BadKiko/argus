@@ -677,7 +677,14 @@ def apply_plan(
             }
 
     if explicit_steps:
-        if strict_plan_enabled() and not _steps_subset_of_plan(plan, slice_plan, path):
+        from argus.llm.session import text_replace_grounded
+
+        if text_replace_grounded(plan):
+            from argus.llm.session import enrich_text_replace_steps
+
+            plan = enrich_text_replace_steps(plan)
+            plan_source = "text_window"
+        elif strict_plan_enabled() and not _steps_subset_of_plan(plan, slice_plan, path):
             plan_source = "rejected_model"
             verify = {
                 "kind": "patch_bytes",
@@ -706,7 +713,7 @@ def apply_plan(
                     "plan_source": plan_source,
                 },
             }
-        if _is_diagnose_plan(plan, path):
+        elif _is_diagnose_plan(plan, path):
             plan_source = "diagnose"
         elif _steps_subset_of_plan(plan, slice_plan, path):
             plan_source = "slice"

@@ -1,0 +1,12 @@
+pid=2464867 poll=None
+pgrep:
+2464867 /usr/lib/beyondcompare/.argus-work/BCompare
+wmctrl hits:
+0x02800017  0 kiko-pc How to Unlock Beyond Compare — Mozilla Firefox
+0x0380000a  0 kiko-pc kiko@kiko-pc: /usr/lib/beyondcompare
+maps:
+7b4240600000-7b42406a7000 r--p 00000000 103:02 4360499                   /usr/lib/beyondcompare/lib7z.so
+7b42406a7000-7b4240830000 r-xp 000a7000 103:02 4360499                   /usr/lib/beyondcompare/lib7z.so
+7b4240830000-7b4240892000 r--p 00230000 103:02 4360499                   /usr/lib/beyondcompare/lib7z.so
+7b4240892000-7b42408a6000 r--p 00291000 103:02 4360499                   /usr/lib/beyondcompare/lib7z.so
+7b42408a6000-7b42408ab000 rw-p 002a5000 103:02 4360499                   /usr/lib/beyondcompare/lib7z.so

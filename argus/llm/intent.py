@@ -212,20 +212,20 @@ def routing_hint(
     sig = task_signals(task_text, binary=binary, discover=discover)
     parts = [format_task_signals(task_text, binary=binary, discover=discover)]
     parts.append(
-        "RE workflow: static find/atlas with task nouns → "
-        "diagnose_failure(error_text=<verbatim find preview>) → "
-        "apply_plan from corrective_patch → verify. Launch only if 0 string hits."
+        "RE workflow: argus_find(query= task nouns) → "
+        "argus_diagnose(error_text=<verbatim find preview>) → "
+        "argus_apply from that plan → argus_run to verify. Launch only if 0 string hits."
     )
     if sig.get("password", 0) > sig.get("gate_transform", 0):
         parts.append(
-            "Password-like signals (hint only): after observing the check, argus_ai/solve may recover a secret."
+            "Password-like signals (hint only): map the check with find/peek/run; do not invent the secret."
         )
     elif sig.get("patch_ui", 0) > 0.5:
-        parts.append("UI-like signals: argus_find + argus_patch replace_string (new len ≤ old).")
+        parts.append("UI-like signals: argus_find then apply a replace_string plan (new len ≤ old).")
     elif sig.get("gate_transform", 0) > 0.4:
         parts.append(
-            "Gate-like signals: find/atlas query= task nouns → diagnose_failure(error_text=hit preview) → apply_plan. "
-            "Do not freestyle argus_patch. Empty slice is not failure."
+            "Gate-like signals: argus_find(query= task nouns) → argus_diagnose(error_text=hit) → argus_apply. "
+            "Empty diagnose is not failure."
         )
     parts.append("Never invent addresses; error_text must be verbatim from user, sandbox, or find hits.")
     return "\n".join(parts)

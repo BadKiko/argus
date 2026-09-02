@@ -1,0 +1,28 @@
+
+=== SO only ===
+ld='.argus-work' poll=127
+stderr='/usr/lib/beyondcompare/.argus-work/BCompare: error while loading shared libraries: lib7z.so: cannot open shared object file: No such file or directory\n'
+ld='.argus-work:.' poll=None
+alive_after_4s=yes
+oracle ok=True detail="GUI launch ok from install cwd (1 window(s)); hint 'BCompare' not matched"
+
+=== SO+114f680 ===
+ld='.argus-work' poll=127
+stderr='/usr/lib/beyondcompare/.argus-work/BCompare: error while loading shared libraries: lib7z.so: cannot open shared object file: No such file or directory\n'
+ld='.argus-work:.' poll=None
+alive_after_4s=yes
+oracle ok=True detail='GUI launch ok from install cwd (1 window(s))'
+
+=== SO+cb7770 ===
+ld='.argus-work' poll=127
+stderr='/usr/lib/beyondcompare/.argus-work/BCompare: error while loading shared libraries: lib7z.so: cannot open shared object file: No such file or directory\n'
+ld='.argus-work:.' poll=None
+alive_after_4s=yes
+oracle ok=True detail="GUI launch ok from install cwd (1 window(s)); hint 'BCompare' not matched"
+
+=== SO+both ===
+ld='.argus-work' poll=127
+stderr='/usr/lib/beyondcompare/.argus-work/BCompare: error while loading shared libraries: lib7z.so: cannot open shared object file: No such file or directory\n'
+ld='.argus-work:.' poll=None
+alive_after_4s=yes
+oracle ok=True detail='GUI launch ok from install cwd (1 window(s))'

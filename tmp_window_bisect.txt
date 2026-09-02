@@ -1,0 +1,5 @@
+minimal SO 23d735: alive=True poll=None home=['0x02400010  0 kiko-pc Home - Beyond Compare'] bc=['0x02800017  0 kiko-pc How to Unlock Beyond Compare — Mozilla Firefox', '0x02400010  0 kiko-pc Home - Beyond Compare'] err=''
+SO only: alive=True poll=None home=['0x02400010  0 kiko-pc Home - Beyond Compare'] bc=['0x02800017  0 kiko-pc How to Unlock Beyond Compare — Mozilla Firefox', '0x02400010  0 kiko-pc Home - Beyond Compare'] err=''
+SO+114f680: alive=True poll=None home=[] bc=['0x02800017  0 kiko-pc How to Unlock Beyond Compare — Mozilla Firefox'] err=''
+SO+cb7770: alive=True poll=None home=[] bc=['0x02800017  0 kiko-pc How to Unlock Beyond Compare — Mozilla Firefox'] err=''
+SO+both: alive=True poll=None home=[] bc=['0x02800017  0 kiko-pc How to Unlock Beyond Compare — Mozilla Firefox'] err=''

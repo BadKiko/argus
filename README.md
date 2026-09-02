@@ -16,9 +16,11 @@ It is **not** a license cracker and **not** a Ghidra clone with a chat box. It i
 | Change behavior safely | Build a `patch_plan`, apply it, verify bytes + smoke behavior |
 | Solve a crackme / password | Symbolic / concolic solve (`argus agent` / `solve`) |
 | Deobfuscate OLLVM-style CFF | Unflatten + optional patch + verify |
+| VMProtect / Themida | Detect → trace/unpack → lift → patch → verify (1.0.0) |
+| Denuvo-class anti-tamper | Runtime observe → protected-module lift → behavior verify (1.0.0) |
 | Reuse past experience | Optional shared case memory (hints, not ground truth) |
 
-**Not in scope (0.2.x):** full commercial VMProtect/Themida unpack; “100% on any binary with no hint.”
+**1.0.0 target:** commercial protection (VMProtect, Themida, Denuvo) on the same agent loop as plain binaries — observe, diagnose, apply, verify — not a separate “crack-only” toolchain.
 
 ---
 
@@ -137,7 +139,7 @@ Backend deploy: [argus-backend/README.md](argus-backend/README.md).
 | `argus.binary` | ELF/PE loaders |
 | `argus.disasm` | Capstone CFG |
 | `argus.symbolic` / `argus.concrete` | Z3 / Unicorn |
-| `argus.deobf` | CFF, MBA, VMP partial |
+| `argus.deobf` | CFF, MBA, VMP/Themida/Denuvo (→ full pipeline in 1.0.0) |
 | `argus.prove` | Certificates / verification levels |
 | `argus.memory` | Remote case memory client |
 | `argus.ir` | Format-agnostic IR skeleton |

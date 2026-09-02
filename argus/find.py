@@ -1159,13 +1159,13 @@ def _diagnose_next_hint(hits: List[Dict[str, Any]], query: Optional[str] = None)
         if looks_host_engine_string(preview):
             return (
                 f"top hit {preview!r} looks like host/engine text, not product UI. "
-                "argus_find/atlas on payload modules from TARGET BRIEF, then "
-                "diagnose_failure(error_text=verbatim payload preview)."
+                "argus_find on payload modules from TARGET BRIEF, then "
+                "argus_diagnose(error_text=verbatim payload preview)."
             )
         return (
             f"top hit {preview!r} looks like a format template, not a runtime banner. "
-            "Exec once (or atlas) and pass a verbatim stdout/GUI line to "
-            "argus_diagnose_failure. Do not apply a wide parser plan first."
+            "argus_run once and pass a verbatim stdout/GUI line to "
+            "argus_diagnose. Do not apply a wide parser plan first."
         )
     if top is None and hits:
         top = hits[0]
@@ -1173,14 +1173,13 @@ def _diagnose_next_hint(hits: List[Dict[str, Any]], query: Optional[str] = None)
         q = (query or "").strip()
         extra = f" query={q!r}" if q else ""
         return (
-            f"0 string hits{extra} — try find/atlas with other task nouns, or exec once "
-            "and pass the verbatim banner to argus_diagnose_failure. Do not invent architecture."
+            f"0 string hits{extra} — try argus_find with other task nouns, or argus_run once "
+            "and pass the verbatim banner to argus_diagnose. Do not invent architecture."
         )
     preview = str(top.get("preview") or "").strip().replace("\n", " ")[:80]
     return (
-        f"argus_diagnose_failure(error_text={preview!r}) then argus_apply_plan "
-        "(omit steps= to use corrective_patch / suggested_batches[0]). "
-        "Do not argus_patch atlas jumps. Empty slice is incomplete, not failure."
+        f"argus_diagnose(error_text={preview!r}) then argus_apply "
+        "(omit steps= to use corrective_patch). Empty diagnose is incomplete, not failure."
     )
 
 
@@ -1192,13 +1191,45 @@ def find_in_binary(
     with_xrefs: bool = True,
 ) -> Dict[str, Any]:
     """Search symbols/strings; rank phrases; optionally attach xrefs + patch hints."""
+    from argus.payload import scan_payload_strings, sniff_magic
+
+    magic = sniff_magic(path)
+    if magic not in ("elf", "pe"):
+        q0 = (query or "").strip()
+        hits = scan_payload_strings(path, q0, limit=limit) if q0 else []
+        preview = str((hits[0] or {}).get("preview") or "") if hits else ""
+        return {
+            "ok": True,
+            "summary": f"find hits={len(hits)} ir={magic}",
+            "observations": [
+                f"argus_diagnose(error_text={preview[:80]!r})" if preview else "no payload hits — try another query"
+            ],
+            "evidence": {"hits": hits, "query": q0, "fmt": magic},
+            "hits": hits,
+            "hints": {},
+            "limits": {"limit": limit, "returned": len(hits)},
+            "next_hint": (
+                f"argus_diagnose(error_text={preview[:80]!r})"
+                if preview
+                else "argus_find(query= another task noun) or argus_run to capture a runtime line"
+            ),
+        }
+
     img = load_binary(path)
+    commercial_overlay = None
+    try:
+        from argus.deobf.commercial import commercial_find_guard, merge_find_commercial
+
+        commercial_overlay = commercial_find_guard(img)
+    except Exception:
+        merge_find_commercial = None  # type: ignore[assignment,misc]
+
     q = (query or "").strip()
     if not q:
         from argus.flow import discover_reject_ui_strings
 
         candidates = discover_reject_ui_strings(img, limit=12)
-        return {
+        empty_result = {
             "ok": True,
             "summary": f"find: no query= — reject_ui_candidates={len(candidates)}",
             "observations": [
@@ -1225,6 +1256,9 @@ def find_in_binary(
                 "no query=: pass query= from user task or pick needle from reject_ui_candidates"
             ),
         }
+        if commercial_overlay and merge_find_commercial is not None:
+            return merge_find_commercial(empty_result, commercial_overlay)
+        return empty_result
 
     keywords = list(DEFAULT_KEYWORDS)
     if query:
@@ -1411,10 +1445,10 @@ def find_in_binary(
         if stripped and not hits:
             next_hint = (
                 "STRIPPED: 0 hits for this query — try other task nouns, then "
-                "diagnose_failure(error_text=verbatim preview). Empty slice is not failure."
+                "argus_diagnose(error_text=verbatim preview). Empty diagnose is not failure."
             )
 
-    return {
+    result = {
         "ok": True,
         "summary": (
             f"find hits={len(hits)} gate_candidates={len(gate_candidates)}"
@@ -1441,3 +1475,6 @@ def find_in_binary(
         "limits": {"limit": limit, "returned": len(hits)},
         "next_hint": next_hint,
     }
+    if commercial_overlay and merge_find_commercial is not None:
+        return merge_find_commercial(result, commercial_overlay)
+    return result

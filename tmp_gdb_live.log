@@ -1,0 +1,27 @@
+pid=2566305 exe_rx_base=0x5bb7c18a3000
+ccaeb0 runtime=0x5bb7c18beeb0
+cb620c runtime=0x5bb7c18aa20c
+
+=== patch bytes @ cb620c (runtime) ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+   0xc18aa20c:	0xc18aa20c:	ptrace: Неприменимый к данному устройству ioctl.
+Cannot access memory at address 0xc18aa20c
+Cannot access memory at address 0xc18aa20c
+The program is not being run.
+
+error_code_global (before) = -1
+
+Waiting up to 90s for ccaeb0 — trigger Enter Key -> OK in BC...
+(Ctrl+C to stop)
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+(gdb) 
+stderr:
+/tmp/tmpnwgtnay5.gdb:5: Error in sourced command file:
+ptrace: Неприменимый к данному устройству ioctl.
+
+
+written: /home/kiko/petwork/argus/tmp_gdb_trace.txt

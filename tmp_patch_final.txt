@@ -1,0 +1,40 @@
+Applying patches...
+  SO branch 0x23d735 taken=True ok=True
+  SO branch 0x23ad34 taken=True ok=True
+  SO branch 0x23ad3a taken=True ok=True
+  SO branch 0x23ad40 taken=False ok=True
+  SO branch 0x14f376 taken=True ok=True
+  SO branch 0x14f3a2 taken=True ok=True
+  SO branch 0x14f42f taken=True ok=True
+  SO branch 0x14f462 taken=False ok=True
+  SO branch 0x14f490 taken=True ok=True
+  SO branch 0x14f504 taken=True ok=True
+  SO branch 0x14f594 taken=False ok=True
+  SO branch 0x14f5b2 taken=False ok=True
+  SO branch 0x14f5ce taken=True ok=True
+  SO branch 0x14f5f2 taken=True ok=True
+  SO branch 0x14f61e taken=True ok=True
+  SO branch 0x14f647 taken=True ok=True
+  SO ret_imm 0x23ac59=1 ok=True
+  SO ret_imm 0x14f310=0 ok=True
+  SO ret_imm 0x1804fe=1 ok=True
+  SO ret_imm 0x180512=1 ok=True
+  EXE patch 0x114f688 ok=True (cmp edi,0x5000 — accept v5 key nibble)
+  EXE patch 0xd30fd8 ok=True (register handler: skip 114f680 version check)
+  backup -> /usr/lib/beyondcompare/.argus-work/libcloudstorage.so.22.0.install-bak
+  ! sudo deploy failed: sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper
+sudo: требуется указать пароль
+
+  Run manually:
+    sudo cp /usr/lib/beyondcompare/.argus-work/libcloudstorage.so.22.0 /usr/lib/beyondcompare/libcloudstorage.so.22.0
+
+WARNING: install SO still ORIGINAL — Enter Key will keep Error 6 until sudo deploy.
+
+Launch: False reject_text visible: '30-day'
+UI: ['Beyond Compare 30-day evaluation']
+Reject: ['30-day']
+
+Launcher (use this): /usr/lib/beyondcompare/.argus-work/run-bcompare.sh
+  /usr/lib/beyondcompare/.argus-work/run-bcompare.sh
+  MUST use run-bcompare.sh (not menu shortcut / plain BCompare)
+Help -> Enter Key... -> paste ANY key block -> OK

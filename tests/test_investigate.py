@@ -22,7 +22,7 @@ def test_suggest_next_tool_gate_empty_plan_diagnoses():
         find_ok=True,
         slice_data={"patch_plan": []},
     )
-    assert tool == "argus_diagnose_failure"
+    assert tool == "argus_diagnose"
     assert "error_text" in reason
 
 
@@ -33,7 +33,7 @@ def test_suggest_next_tool_password():
         find_ok=True,
         slice_data={"patch_plan": []},
     )
-    assert tool == "argus_atlas"
+    assert tool == "argus_find"
     assert reason
     from argus.llm.investigate import rank_tool_suggestions
 
@@ -44,8 +44,8 @@ def test_suggest_next_tool_password():
         slice_data={"patch_plan": []},
     )
     names = [x["tool"] for x in ranked]
-    assert names[0] == "argus_atlas"
-    assert "argus_ai" in names
+    assert names[0] == "argus_find"
+    assert "argus_solve" not in names
 
 
 def test_suggest_next_tool_gate_with_plan():
@@ -56,7 +56,7 @@ def test_suggest_next_tool_gate_with_plan():
         slice_data={"patch_plan": [{"kind": "ret_imm", "addr": "0x1000", "confidence": "high"}]},
         tools_tried=["argus_slice"],
     )
-    assert tool == "argus_apply_plan"
+    assert tool == "argus_apply"
 
 
 @pytest.mark.skipif(not FAUXWARE.is_file(), reason="samples/fauxware missing")
@@ -83,8 +83,8 @@ def test_run_investigate_does_not_inject_archetype_recipe():
     assert "Hypothesis (unverified)" not in obs
     ranked = (d.get("hints") or {}).get("suggested_tools") or []
     names = [x.get("tool") for x in ranked]
-    assert "argus_atlas" in names
-    assert names[0] != "argus_ai"
+    assert "argus_find" in names
+    assert "argus_solve" not in names
 
 
 @pytest.mark.skipif(not FAUXWARE.is_file(), reason="samples/fauxware missing")

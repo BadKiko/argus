@@ -109,7 +109,12 @@ def build_research_brief(
 
     slice_len = 0
     for entry in tool_trace:
-        if entry.get("tool") not in ("argus_slice", "argus_investigate"):
+        if entry.get("tool") not in (
+            "argus_slice",
+            "argus_investigate",
+            "argus_diagnose",
+            "argus_diagnose_failure",
+        ):
             continue
         raw = entry.get("result")
         payload = raw if isinstance(raw, dict) else {}
@@ -124,8 +129,8 @@ def build_research_brief(
 
     lines.append("")
     lines.append("Evidence gaps (pick next experiment):")
-    if "investigate" not in tried:
-        lines.append("  • no investigate yet — observations may help")
+    if "look" not in tried and "investigate" not in tried:
+        lines.append("  • no look yet — classify host vs payload")
     if "find" not in tried:
         lines.append("  • no find yet — need query/needle from task")
     if slice_len == 0:

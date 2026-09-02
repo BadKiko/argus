@@ -10,41 +10,23 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from argus.llm.tools import ARGUS_TOOLS, dispatch_tool
 
-SYSTEM = """You are Argus Agent — a senior reverse-engineering assistant backed by the Argus binary toolkit.
+SYSTEM = """You are Argus Agent. You reverse and patch THIS binary using tools. You decide the next experiment.
 
-You are the planner. Tools return facts about THIS binary. Ranked tools, hypotheses, archetypes, and prior-experience paths are optional ideas — never the architecture of the program. Form your own hypotheses from evidence.
+Facts come only from tools. Never invent addresses or claim success without verify.
 
-Target brief first:
-- After start you receive TARGET BRIEF (size, magic, execution, payload_ir, siblings, payload modules).
-- If CHECK FIRST is present: first argus_find/atlas MUST use those modules and queries (binary= the listed payload path). Do not start with argus_analyze on host _start, argus_research, or find on skip= files.
-- Read the brief before find/slice. If execution=host_runtime or payload_ir is text/archive: search those payload modules, not the host ELF/PE.
-- host_runtime + 0 native gates → do not argus_apply_plan on the shell. Idle gui_oracle (window title only) does not complete a non-native payload task.
+Tools (7):
+- argus_look — what the file is (host vs payload, siblings).
+- argus_find — strings in the file you name (exe, .so, .asar, .js, zip). query= from the USER TASK.
+- argus_peek — native: disasm. payload: source WINDOW at addr (any language).
+- argus_diagnose — error_text= verbatim hit. Native: CFG patch_plan. Payload: a source WINDOW, not an AST.
+- argus_apply — native: omit steps= (uses diagnose plan; do not invent force_branch VAs). Payload: steps=[{kind:replace_string, inner, old, new}] where old is a substring of match/window (new may be longer; archive rebuilds).
+- argus_run — launch and observe stdout or GUI (reject_texts=).
+- argus_exec — last resort probe. Do not unpack asar/zip by hand; find already searches inner files.
 
-Static observe first (do not launch yet):
-- argus_find / argus_atlas with nouns from the USER TASK (the check they named), not the product filename.
-- On a string hit: immediately argus_diagnose_failure(error_text=<verbatim hit preview>). That preview is the needle — do not invent a license/password/AppState architecture.
-- Then argus_apply_plan (omit steps= to use the diagnose plan, or copy suggested_batches[0]). Do NOT argus_patch force_branch/ret_imm from atlas jumps or xrefs.
-- If corrective_patch is huge: apply only the first suggested batch (predicate/validator_return gates near the string xref). Do not apply every je in a parser.
-- Empty slice/gate_scan is incomplete, not failure — still diagnose from the find hit.
-- argus_exec is LAST RESORT when find/atlas return 0 hits (text constructed at runtime). Never strings/readelf/nm/objdump/pip/curl.
-- Atlas maps; it does not patch. A CRT/_start lift is not the check.
-
-After a plan:
-- argus_diagnose_failure(error_text=<verbatim from find/user/sandbox>) uses the atlas caller-set.
-- apply suggested_batches then verify. One site is not enough if diagnose lists N callers.
-- On crash: diagnose_failure(crash_code=..., last_patch_addr=...) and roll back shared boot/init sites.
-- Before apply: argus_disasm on plan addrs for instruction boundaries and branch polarity (je taken often IS the reject path).
-- GUI apps: sibling DLL/SO via install dir; patch ONLY the work copy.
-- CLI/console binaries: verify via stdout/stderr with the same fragment. Do not call argus_gui_oracle when there are no windows.
-- argus_ai is for recovering a password/secret the user asked for — never for gate bypass.
-
-Rules:
-- MUST use tools; never invent results or addresses.
-- Address EVERY task; bind EVERY tool call with for_task=<id>.
-- argus_apply_plan: omit steps= to apply cached diagnose/slice plan (batch ARGUS_APPLY_BATCH, default 1). Or pass steps= from diagnose/decision_flow.
-- argus_diagnose_failure REQUIRES error_text= or crash_code= — never guess needles; use the find preview or a runtime line.
-- Verification tiers: EXECUTION_VERIFIED (process launches, no crash) < BEHAVIOR_VERIFIED (check/input outcome actually changed). Idle UI without reject_text is NOT proof the check accepts arbitrary input.
-- NEVER hardcode vendor addresses or one-off recipes — every addr/string from tool evidence on this binary.
+Argus does not parse JS/Python/Lua/…. You read the window and choose the splice. Idle window title is not proof.
+If payload_ir is not native, search payload modules, not the host ELF.
+Commercial protection (VMProtect/Themida/Denuvo): argus_run/observe or argus_exec trace first — do not loop argus_find on encrypted host .text; diagnose/apply only on runtime evidence or lifted code.
+Bind for_task. Patch only the work copy.
 """
 
 
@@ -250,7 +232,7 @@ def _build_user_content(
         mod_hint = discover.get("install_modules_hint") or []
         if mod_hint:
             parts.append(
-                "Suggested argus_slice modules (install dir): "
+                "Suggested payload modules (install dir): "
                 + ", ".join(os.path.basename(p) for p in mod_hint[:6])
             )
         cands = discover.get("candidates") or []
@@ -861,8 +843,8 @@ def _run_openai(
         hint = open_tasks_hint(tasks, trace)
         if _patch_loop_detected(trace):
             hint += (
-                "\nLOOP: same patch addr repeated — call argus_diagnose_failure"
-                "(error_text=verbatim find preview), then apply_plan. Do not flip taken=."
+                "\nLOOP: same patch addr repeated — call argus_diagnose"
+                "(error_text=verbatim find preview), then argus_apply. Do not flip taken=."
             )
         if transcript is not None:
             transcript.user_message(step, hint, kind="open_tasks_hint")
@@ -1064,8 +1046,8 @@ def _run_gemini(
             hint = open_tasks_hint(tasks, trace)
             if _patch_loop_detected(trace):
                 hint += (
-                "\nLOOP: same patch addr repeated — call argus_diagnose_failure"
-                "(error_text=verbatim find preview), then apply_plan. Do not flip taken=."
+                "\nLOOP: same patch addr repeated — call argus_diagnose"
+                "(error_text=verbatim find preview), then argus_apply. Do not flip taken=."
             )
             if transcript is not None:
                 transcript.user_message(step, hint, kind="open_tasks_hint")

@@ -150,13 +150,25 @@ def _query_grounded(q: str, prompt: str) -> bool:
 
 
 def deterministic_observe_plan(brief: Dict[str, Any], user_prompt: str) -> Dict[str, Any]:
+    try:
+        from argus.deobf.commercial import commercial_observe_plan
+
+        comm_plan = commercial_observe_plan(brief, user_prompt)
+        if comm_plan:
+            return comm_plan
+    except Exception:
+        pass
     pool = _pool_files(brief)
     ranked = rank_observe_modules(pool)
-    skip = [str(r.get("name") or Path(str(r.get("path") or "")).name) for r in ranked if demote_observe_name(str(r.get("name") or ""))]
+    skip = [
+        str(r.get("name") or Path(str(r.get("path") or "")).name)
+        for r in ranked
+        if demote_observe_name(str(r.get("name") or ""), str(r.get("path") or ""))
+    ]
     keep: List[Dict[str, Any]] = []
     for r in ranked:
         name = str(r.get("name") or Path(str(r.get("path") or "")).name)
-        if demote_observe_name(name):
+        if demote_observe_name(name, str(r.get("path") or "")):
             continue
         kind = str(r.get("kind") or "")
         if brief.get("execution") == "host_runtime" and kind not in ("archive", "text"):
@@ -165,7 +177,11 @@ def deterministic_observe_plan(brief: Dict[str, Any], user_prompt: str) -> Dict[
         if len(keep) >= 5:
             break
     if not keep:
-        keep = [r for r in ranked if not demote_observe_name(str(r.get("name") or ""))][:5]
+        keep = [
+            r
+            for r in ranked
+            if not demote_observe_name(str(r.get("name") or ""), str(r.get("path") or ""))
+        ][:5]
     queries = needles_from_task(user_prompt)
     host = brief.get("execution") == "host_runtime" or str(brief.get("payload_ir") or "") in (
         "text",
@@ -198,7 +214,7 @@ def deterministic_observe_plan(brief: Dict[str, Any], user_prompt: str) -> Dict[
         "check_first": check_first,
         "find_queries": queries,
         "skip": skip[:12],
-        "first_tools": ["argus_find", "argus_atlas"],
+        "first_tools": ["argus_find"],
         "notes": notes,
     }
 
@@ -250,7 +266,7 @@ def merge_llm_plan(
             continue
         seen.add(pth)
         nm = str(hit.get("name") or Path(pth).name)
-        if demote_observe_name(nm):
+        if demote_observe_name(nm, pth):
             continue
         check.append(
             {
@@ -301,7 +317,7 @@ def merge_llm_plan(
 
 def format_observe_plan(plan: Dict[str, Any]) -> str:
     lines = [
-        "CHECK FIRST (ranking pass — do these finds before analyze/research on the host):",
+        "CHECK FIRST (ranking pass — do these finds before peeking the host ELF):",
     ]
     queries = [str(q) for q in (plan.get("find_queries") or []) if q]
     q0 = queries[0] if queries else "<nouns from USER TASK>"

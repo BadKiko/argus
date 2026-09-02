@@ -1,0 +1,45 @@
+{
+  "title": "Beyond Compare — license gate bypass (Linux)",
+  "task": "убери проверку лицензии",
+  "binary": "/usr/lib/beyondcompare/BCompare",
+  "install_dir": "/usr/lib/beyondcompare",
+  "verification_level_target": "BEHAVIOR_VERIFIED",
+  "notes": [
+    "Primary executable is BCompare; gate logic lives in libcloudstorage.so.22.0 (not libQt6Pas).",
+    "Do NOT patch UI strings (30-day, registered) — that does not remove the check.",
+    "Workflow: discover → argus_slice(binary=BCompare, query=trial|license) → argus_apply_plan(binary= only) batch=1 → gui_oracle.",
+    "Multi-module: patched SO must keep original basename in .argus-work/ so LD_LIBRARY_PATH loads it before install dir.",
+    "First plan step (example): force_branch @ 0x23d735 taken=True on libcloudstorage.so.22.0 near xref trial strings."
+  ],
+  "discover": {
+    "primary_must_be_executable": true,
+    "linked_module_hint": "libcloudstorage.so.22.0",
+    "avoid_primary": ["libQt6Pas.so.6"]
+  },
+  "golden_tool_trace": [
+    {
+      "tool": "argus_discover",
+      "summary": "primary=BCompare linked includes libcloudstorage"
+    },
+    {
+      "tool": "argus_slice",
+      "args": {"query": "trial license", "multi": true},
+      "expect": {"patch_plan_len_min": 1, "module_contains": "libcloudstorage"}
+    },
+    {
+      "tool": "argus_apply_plan",
+      "args": {"steps": null},
+      "expect": {"step_source": "session_slice", "sandbox_safe": true}
+    },
+    {
+      "tool": "argus_gui_oracle",
+      "expect": {"ok": false, "until": "no trial/evaluation dialog in ui_texts"}
+    }
+  ],
+  "anti_patterns": [
+    "argus_find query=not registered → replace_string (UI hint on gate task)",
+    "argus_patch freestyle force_branch when session patch_plan exists",
+    "gui_oracle ok=true while window title contains 30-day evaluation",
+    "apply_plan sandbox fail on multi-module (addr in libcloudstorage, primary BCompare)"
+  ]
+}

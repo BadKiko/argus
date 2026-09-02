@@ -1,0 +1,9 @@
+
+== LD_PATH_only ==
+count=0
+
+== PRELOAD ==
+count=3
+7c16ba800000-7c16baca4000 r-xp 00000000 103:02 4360181                   /usr/lib/beyondcompare/.argus-work/libcloudstorage.so.22.0
+7c16baca4000-7c16baea4000 ---p 004a4000 103:02 4360181                   /usr/lib/beyondcompare/.argus-work/libcloudstorage.so.22.0
+7c16baea4000-7c16baeb7000 rw-p 004a4000 103:02 4360181                   /usr/lib/beyondcompare/.argus-work/libcloudstorage.so.22.0

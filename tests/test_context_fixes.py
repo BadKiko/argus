@@ -145,7 +145,7 @@ def test_slice_empty_plan_incomplete_not_failed(tmp_path, monkeypatch):
     assert data.get("ok") is True
     assert data.get("next_errors")
     hint = (data.get("next_hint") or "") + " ".join(data.get("next_errors") or [])
-    assert "diagnose_failure" in hint
+    assert "argus_diagnose" in hint
 
 
 def test_freestyle_patch_blocked_without_plan(tmp_path, monkeypatch):
@@ -163,7 +163,7 @@ def test_freestyle_patch_blocked_without_plan(tmp_path, monkeypatch):
     data = json.loads(raw)
     assert data.get("ok") is False
     assert (data.get("evidence") or {}).get("error") == "freestyle_blocked"
-    assert "diagnose_failure" in (data.get("next_hint") or "")
+    assert "argus_diagnose" in (data.get("next_hint") or "")
 
 
 def test_gui_oracle_skips_cli_elf(tmp_path):

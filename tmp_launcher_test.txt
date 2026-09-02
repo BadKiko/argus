@@ -1,0 +1,2 @@
+home=['0x02400010  0 kiko-pc Home - Beyond Compare']
+cloud=['7090f5400000-7090f58a4000 r-xp 00000000 103:02 4360181                   /usr/lib/beyondcompare/.argus-work/libcloudstorage.so.22.0', '7090f58a4000-7090f5aa4000 ---p 004a4000 103:02 4360181                   /usr/lib/beyondcompare/.argus-work/libcloudstorage.so.22.0']

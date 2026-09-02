@@ -1,4 +1,12 @@
 from argus.deobf.cff import CFFReport, cleaned_adjacency, find_dispatcher, recover_cff
+from argus.deobf.commercial import (
+    CommercialBrief,
+    analyze_commercial,
+    commercial_find_guard,
+    commercial_observe_plan,
+    format_commercial_text,
+    is_commercial_kind,
+)
 from argus.deobf.detect import ProtectionReport, detect_protection
 from argus.deobf.unflatten import UnflattenResult, apply_unflatten, deobf_and_patch, solve_after_deobf
 from argus.deobf.vm import HandlerSynthesizer, VMReport, decode_toy_bytecode
@@ -20,6 +28,12 @@ __all__ = [
     "solve_after_deobf",
     "detect_protection",
     "ProtectionReport",
+    "analyze_commercial",
+    "CommercialBrief",
+    "commercial_find_guard",
+    "commercial_observe_plan",
+    "format_commercial_text",
+    "is_commercial_kind",
     "analyze_vmp_layer",
     "VMPLayerReport",
     "analyze_bogus_cf",

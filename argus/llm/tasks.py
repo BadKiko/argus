@@ -29,6 +29,10 @@ _CONN_RX = re.compile(
 )
 
 _TO_RX = re.compile(r"(?:^|\s)чтобы\s+", re.IGNORECASE)
+_PREAMBLE_RX = re.compile(
+    r"^(?:сделай(?:те)?|please|make|нужно|надо|хочу|can you|could you)$",
+    re.IGNORECASE,
+)
 
 # UI-ish wording → weak logic patch may count toward done
 _UI_HINT_RX = re.compile(
@@ -153,7 +157,7 @@ def split_user_tasks(prompt: str) -> List[UserTask]:
         if len(sub) > 2:
             # first piece may be preamble ("убери X") keep it; rest are "чтобы"-bodies
             head = sub[0].strip()
-            if head:
+            if head and not _PREAMBLE_RX.match(head):
                 parts.append(head)
             for body in sub[1:]:
                 body = body.strip(" \t,.")
@@ -202,16 +206,23 @@ def open_tasks_hint(tasks: List[UserTask], tool_trace: List[Dict[str, Any]]) -> 
         if s.status != "done":
             lines.append(f"  {s.task.id}: {s.status} — {s.detail}")
     lines.append(
-        "Workflow: find/atlas with task nouns → diagnose_failure(error_text=verbatim hit) → "
-        "apply_plan. Empty slice is not failure. CLI: stdout, not gui_oracle. Do not freestyle argus_patch."
+        "Workflow: argus_find(query= task nouns) → argus_diagnose(error_text=verbatim hit) → "
+        "argus_apply. Empty diagnose is not failure. CLI: argus_run stdout. GUI: argus_run(reject_texts=)."
     )
     return "\n".join(lines)
+
+
+_PLAN_TOOLS = frozenset(
+    {"argus_slice", "argus_investigate", "argus_diagnose", "argus_diagnose_failure"}
+)
+_APPLY_TOOLS = frozenset({"argus_apply_plan", "argus_apply"})
+_GUI_ORACLE_TOOLS = frozenset({"argus_gui_oracle"})
 
 
 def _max_slice_plan_len(tool_trace: List[Dict[str, Any]]) -> int:
     best = 0
     for entry in tool_trace:
-        if entry.get("tool") not in ("argus_slice", "argus_investigate"):
+        if entry.get("tool") not in _PLAN_TOOLS:
             continue
         payload = _parse_result(entry)
         plan = payload.get("patch_plan")
@@ -228,14 +239,14 @@ def _fauxware_loop_pattern(tool_trace: List[Dict[str, Any]]) -> bool:
     saw_logic_patch = False
     for entry in tool_trace:
         tool = entry.get("tool")
-        if tool in ("argus_slice", "argus_investigate"):
+        if tool in _PLAN_TOOLS:
             payload = _parse_result(entry)
             plan = payload.get("patch_plan") or (payload.get("evidence") or {}).get("patch_plan") or []
             if isinstance(plan, list) and len(plan) == 0:
                 saw_empty_slice = True
         elif tool == "argus_patch" and _is_logic_patch(entry):
             saw_logic_patch = True
-        elif tool == "argus_apply_plan" and saw_empty_slice and saw_logic_patch:
+        elif tool in _APPLY_TOOLS and saw_empty_slice and saw_logic_patch:
             return True
     return False
 
@@ -245,10 +256,10 @@ def _slice_plan_in_trace(
     *,
     task_id: Optional[int] = None,
 ) -> Tuple[bool, int]:
-    """True if trace contains argus_slice or argus_investigate with non-empty patch_plan (optionally same for_task)."""
+    """True if trace contains diagnose/slice with non-empty patch_plan (optionally same for_task)."""
     best = 0
     for entry in tool_trace:
-        if entry.get("tool") not in ("argus_slice", "argus_investigate"):
+        if entry.get("tool") not in _PLAN_TOOLS:
             continue
         if task_id is not None:
             payload = _parse_result(entry)
@@ -427,7 +438,7 @@ def _task_id_from_entry(entry: Dict[str, Any], payload: Dict[str, Any]) -> Optio
 
 
 def _is_logic_patch(entry: Dict[str, Any]) -> bool:
-    if entry.get("tool") == "argus_apply_plan":
+    if _is_apply_plan(entry):
         return False  # handled via patch_bytes verify
     if entry.get("tool") != "argus_patch":
         return False
@@ -444,11 +455,21 @@ def _is_logic_patch(entry: Dict[str, Any]) -> bool:
 
 
 def _is_apply_plan(entry: Dict[str, Any]) -> bool:
-    return entry.get("tool") == "argus_apply_plan"
+    return entry.get("tool") in _APPLY_TOOLS
 
 
 def _is_gui_oracle(entry: Dict[str, Any]) -> bool:
-    return entry.get("tool") == "argus_gui_oracle"
+    tool = entry.get("tool")
+    if tool in _GUI_ORACLE_TOOLS:
+        return True
+    if tool == "argus_run":
+        args = entry.get("args") or {}
+        if args.get("reject_texts") or args.get("main_window_hint"):
+            return True
+        payload = _parse_result(entry)
+        kind = str((payload.get("verify") or {}).get("kind") or "")
+        return kind in ("gui", "gui_oracle", "window")
+    return False
 
 
 def _gui_oracle_ok(payload: Dict[str, Any]) -> bool:
@@ -599,10 +620,10 @@ def _evaluate_tasks(
                     # Probe / policy refusal — not a solved-or-failed gate outcome.
                     last_ok_detail = summary or "exec skipped"
                     continue
-                if entry.get("tool") == "argus_slice":
-                    last_ok_detail = summary or "empty slice — diagnose from find hit"
+                if entry.get("tool") in _PLAN_TOOLS:
+                    last_ok_detail = summary or "empty diagnose — use error_text from a find hit"
                     continue
-                if entry.get("tool") == "argus_gui_oracle":
+                if _is_gui_oracle(entry):
                     last_ok_detail = summary or "gui oracle skipped"
                     continue
                 err = str((payload.get("evidence") or {}).get("error") or "")
@@ -805,7 +826,7 @@ def _evaluate_tasks(
                 + " — need argus_exec showing the same reject fragment gone from stdout"
             )
             if not _binary_looks_cli(binary):
-                need += " or argus_gui_oracle(reject_texts=...) on patched binary"
+                need += " or argus_run(reject_texts=...) on patched binary"
             out.append(
                 _emit_task_status(
                     t,
@@ -828,15 +849,15 @@ def _evaluate_tasks(
             continue
 
         if gate_task and (had_patch_fail or had_attempted_logic):
-            detail = fail_detail or last_ok_detail or "need argus_apply_plan verify.ok"
+            detail = fail_detail or last_ok_detail or "need argus_apply verify.ok"
             if had_attempted_logic and not had_patch_ok:
-                detail = detail or "freestyle logic patch — not patch_plan; use argus_slice + apply_plan"
+                detail = detail or "freestyle logic patch — not patch_plan; use argus_diagnose + argus_apply"
             if not had_gui_oracle_ok:
                 if _binary_looks_cli(binary):
                     extra = "then argus_exec showing reject fragment gone from stdout"
                 else:
                     extra = (
-                        "then argus_gui_oracle on patched exe or "
+                        "then argus_run(reject_texts=) on patched exe or "
                         "argus_exec showing reject fragment gone from stdout"
                     )
                 detail = (detail + "; " + extra).strip("; ")

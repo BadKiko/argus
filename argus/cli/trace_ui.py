@@ -15,14 +15,20 @@ from rich.text import Text
 from argus.cli.trace_graph import InvestigationGraph
 
 _TOOL_STYLE = {
-    "argus_slice": "cyan",
+    "argus_look": "yellow",
     "argus_find": "blue",
-    "argus_patch": "magenta",
+    "argus_peek": "white",
+    "argus_diagnose": "cyan",
+    "argus_apply": "green",
+    "argus_run": "magenta",
+    "argus_exec": "bright_black",
+    "argus_solve": "bright_green",
+    "argus_slice": "cyan",
     "argus_apply_plan": "green",
     "argus_discover": "yellow",
     "argus_lift": "white",
     "argus_ai": "bright_blue",
-    "argus_solve": "bright_green",
+    "argus_patch": "magenta",
 }
 
 
@@ -43,31 +49,35 @@ def _addr(args: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> str
 
 def describe_tool_call(name: str, args: Dict[str, Any]) -> str:
     mod = _short_path(args.get("binary") or args.get("module") or "")
-    if name == "argus_slice":
-        q = args.get("query") or ""
-        return f'gate scan' + (f' "{q}"' if q else "")
+    if name in ("argus_look", "argus_discover"):
+        return "look"
+    if name in ("argus_diagnose", "argus_slice", "argus_diagnose_failure"):
+        q = args.get("query") or args.get("error_text") or ""
+        return ("diagnose" if args.get("error_text") else "gate scan") + (f' "{q[:40]}"' if q else "")
     if name == "argus_find":
         return f'find "{args.get("query") or "?"}"'
+    if name == "argus_peek":
+        return f"peek {args.get('addr') or args.get('function') or '?'}"
+    if name in ("argus_apply", "argus_apply_plan"):
+        return "apply plan"
+    if name in ("argus_run", "argus_gui_oracle"):
+        return "run / observe"
+    if name == "argus_exec":
+        return "exec"
+    if name in ("argus_solve", "argus_ai"):
+        return "solve"
     if name == "argus_patch":
         kind = args.get("kind") or "patch"
         at = _addr(args)
         return f"{kind}" + (f" {at}" if at else "")
-    if name == "argus_apply_plan":
-        return "apply plan"
-    if name == "argus_discover":
-        return "discover DLL/SO"
     if name == "argus_lift":
         return f"lift {args.get('entry') or args.get('function') or '?'}"
-    if name == "argus_ai":
-        return "ask AI"
-    if name == "argus_solve":
-        return "solve password"
     return name.replace("argus_", "")
 
 
 def describe_tool_result(name: str, args: Dict[str, Any], payload: Dict[str, Any]) -> str:
     ok = payload.get("ok")
-    if name == "argus_slice":
+    if name in ("argus_slice", "argus_diagnose", "argus_diagnose_failure"):
         plan = payload.get("patch_plan") or (payload.get("evidence") or {}).get("patch_plan") or []
         return f"plan={len(plan)}"
     if name == "argus_find":
@@ -77,10 +87,10 @@ def describe_tool_result(name: str, args: Dict[str, Any], payload: Dict[str, Any
         if payload.get("patched_path"):
             return _short_path(payload["patched_path"])
         return "ok" if ok else "fail"
-    if name == "argus_discover":
+    if name in ("argus_discover", "argus_look"):
         linked = payload.get("linked") or (payload.get("evidence") or {}).get("linked") or []
         return f"{len(linked)} linked" if linked else "scan"
-    if name == "argus_apply_plan":
+    if name in ("argus_apply_plan", "argus_apply"):
         v = (payload.get("verify") or {}).get("ok")
         return "verified" if v else "verify fail"
     if ok is True:
@@ -91,11 +101,11 @@ def describe_tool_result(name: str, args: Dict[str, Any], payload: Dict[str, Any
 
 
 def _fan_out_modules(name: str, payload: Dict[str, Any]) -> Optional[List[str]]:
-    if name == "argus_discover":
+    if name in ("argus_discover", "argus_look"):
         linked = payload.get("linked") or (payload.get("evidence") or {}).get("linked") or []
         names = [_short_path(m.get("path")) for m in linked if isinstance(m, dict) and m.get("path")]
         return names if len(names) > 1 else None
-    if name == "argus_slice":
+    if name in ("argus_slice", "argus_diagnose"):
         mods = payload.get("modules") or (payload.get("evidence") or {}).get("modules") or []
         names = [_short_path(m) for m in mods if m]
         if len(names) > 1:

@@ -1,0 +1,2 @@
+HOME=['0x02400010  0 kiko-pc Home - Beyond Compare']
+CLOUD=[]

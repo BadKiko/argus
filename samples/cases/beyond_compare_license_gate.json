@@ -1,0 +1,68 @@
+{
+  "case_id": "beyond_compare_linux_license_gate",
+  "title": "Beyond Compare 4.x — Linux license gate (libcloudstorage)",
+  "task": "убери проверку лицензии",
+  "binary": "/usr/lib/beyondcompare/BCompare",
+  "install_dir": "/usr/lib/beyondcompare",
+  "outcome": "partial",
+  "verification_level": "BEHAVIOR_VERIFIED",
+  "planner": "manual_reference",
+  "strategy": {
+    "summary": "Gate in libcloudstorage.so.22.0; SO patched in-place. Do NOT stub sub_14f310 or patch exe 114f680/d30fd8.",
+    "steps": [
+      "discover(root=install_dir) → primary=BCompare, linked=libcloudstorage.so.22.0",
+      "argus_slice(binary=work/BCompare, query=trial license) → patch_plan force_branch on libcloudstorage",
+      "argus_apply_plan(binary=work/BCompare only) — session batch; patches SO into .argus-work/ same basename",
+      "argus_gui_oracle — must NOT show 30-day / evaluation dialog (ok=false until bypass complete)"
+    ],
+    "example_patch_plan_step": {
+      "kind": "force_branch",
+      "addr": "0x23d735",
+      "taken": true,
+      "module": "/usr/lib/beyondcompare/libcloudstorage.so.22.0",
+      "why": "jcc after cmp near trial/evaluation xref — ONLY this step needed for Home launch"
+    },
+    "verified_minimal_patch": {
+      "files": [
+        "/usr/lib/beyondcompare/libcloudstorage.so.22.0"
+      ],
+      "exe": "BCompare unchanged (clean .argus-work copy for launch only)",
+      "backups": "/usr/lib/beyondcompare/original/",
+      "mode": "ARGUS_PATCH_MODE=in_place",
+      "so_patches": {
+        "force_branch": ["0x23d735", "0x23ad34", "0x23ad3a", "0x14f376", "0x14f3a2", "0x14f42f", "0x14f490", "0x14f504", "0x14f5ce", "0x14f5f2", "0x14f61e", "0x14f647"],
+        "ret_imm": ["0x23ac59=1", "0x1804fe=1", "0x180512=1"],
+        "critical_avoid": "ret_imm @ 0x14f310 — skips license commit → Error 5 in exe"
+      },
+      "exe_do_not_patch": ["0x114f680", "0xd30fd8", "0xd30fdf", "cmp 0x4000→0x5000 — all break startup (30-day or 10×10 window)"],
+      "launch": "/usr/lib/beyondcompare/run-BCompare.sh",
+      "deploy": "pkexec/sudo for root-owned libcloudstorage in install dir",
+      "gui_oracle": "Home - Beyond Compare, no 30-day; Enter Key: no Error 5/6 on fake key",
+      "note": "Footer may still show trial until full apply+commit path verified; LD_PRELOAD breaks BC."
+    },
+    "alternate_queries": ["LICENSEKEY", "validate"],
+    "do_not": [
+      "primary=libQt6Pas.so.6",
+      "argus_find not registered → replace_string",
+      "freestyle argus_patch when session patch_plan exists",
+      "gui_oracle ok while ui_texts contain 30-day evaluation"
+    ]
+  },
+  "tool_trace_reference": [
+    {"tool": "argus_discover", "ok": true, "summary": "primary=BCompare"},
+    {"tool": "argus_slice", "ok": true, "patch_plan_len": 1},
+    {"tool": "argus_apply_plan", "step_source": "session_slice", "modules_patched": ["libcloudstorage.so.22.0"]},
+    {"tool": "argus_gui_oracle", "ok": false, "reject": "30-day evaluation visible — apply remaining plan batches"}
+  ],
+  "context_fixes_applied": [
+    "discover prefers install executable over scored .so",
+    "scan skips .argus-work and *.patched artifacts",
+    "sandbox multi-module preflight",
+    "module patches keep original SO basename for LD_LIBRARY_PATH",
+    "launch_env prepends .argus-work before install in LD_LIBRARY_PATH",
+    "find intent respects gate task over string query",
+    "gui_oracle default reject trial/evaluation titles",
+    "freestyle logic patch blocked when session patch_plan exists",
+    "slice empty plan returns ok=false"
+  ]
+}

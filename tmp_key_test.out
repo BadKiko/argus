@@ -1,0 +1,11 @@
+XGetWindowProperty[_NET_WM_DESKTOP] failed (code=1)
+XGetWindowProperty[_NET_ACTIVE_WINDOW] failed (code=1)
+REG=6293203
+XGetWindowProperty[_NET_WM_DESKTOP] failed (code=1)
+WINDOWS:
+0x02800017  0 kiko-pc How to Unlock Beyond Compare — Mozilla Firefox
+0x0380000a  0 kiko-pc kiko@kiko-pc: /usr/lib/beyondcompare
+0x03853934  0 kiko-pc kiko@kiko-pc: /usr/lib/beyondcompare
+0x03200007  0 kiko-pc ~/petwork/argus - Sublime Merge (UNREGISTERED)
+0x02400010  0 kiko-pc Home - Beyond Compare
+0x02400025  0 kiko-pc Register Beyond Compare

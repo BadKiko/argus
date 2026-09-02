@@ -1,0 +1,28 @@
+SO only: ok=True detail="GUI launch ok from install cwd (1 window(s)); hint 'BCompare' not matched" reject=[]
+SO + d30fdf: ok=False detail='process exited code=-15' reject=[]
+SO + d30fd2: ok=False detail="reject_text visible: '30-day'" reject=['30-day']
+SO + d30fd2+d30fdf: ok=False detail="reject_text visible: '30-day'" reject=['30-day']
+Traceback (most recent call last):
+  File "<stdin>", line 38, in <module>
+  File "<stdin>", line 23, in run
+  File "/home/kiko/petwork/argus/argus/patch/intents.py", line 12, in force_branch
+    patcher = Patcher.from_path(path)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/kiko/petwork/argus/argus/patch/patcher.py", line 26, in from_path
+    image = load_binary(path)
+            ^^^^^^^^^^^^^^^^^
+  File "/home/kiko/petwork/argus/argus/binary/image.py", line 177, in load_binary
+    img = load_elf(path)
+          ^^^^^^^^^^^^^^
+  File "/home/kiko/petwork/argus/argus/binary/elf.py", line 15, in load_elf
+    elf = ELFFile(f)
+          ^^^^^^^^^^
+  File "/home/kiko/petwork/argus/.venv/lib/python3.12/site-packages/elftools/elf/elffile.py", line 91, in __init__
+    self._identify_file()
+  File "/home/kiko/petwork/argus/.venv/lib/python3.12/site-packages/elftools/elf/elffile.py", line 659, in _identify_file
+    elf_assert(magic == b'\x7fELF', 'Magic number does not match')
+  File "/home/kiko/petwork/argus/.venv/lib/python3.12/site-packages/elftools/common/utils.py", line 88, in elf_assert
+    _assert_with_exception(cond, msg, ELFError)
+  File "/home/kiko/petwork/argus/.venv/lib/python3.12/site-packages/elftools/common/utils.py", line 132, in _assert_with_exception
+    raise exception_type(msg)
+elftools.common.exceptions.ELFError: Magic number does not match

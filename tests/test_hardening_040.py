@@ -99,7 +99,7 @@ def test_find_gate_query_hints_diagnose():
     get_session().user_task_text = "убери проверку лицензии"
     path = str(SAMPLES / "fauxware")
     data = find_in_binary(path, "password")
-    assert "diagnose_failure" in (data.get("next_hint") or "")
+    assert "argus_diagnose" in (data.get("next_hint") or "")
     assert "argus_patch kind=" not in (data.get("next_hint") or "")
 
 
@@ -319,7 +319,7 @@ def test_suggest_next_tool_after_verify_fail():
         tools_tried=["argus_apply_plan"],
         verify_ok=False,
     )
-    assert tool == "argus_diagnose_failure"
+    assert tool == "argus_diagnose"
 
 
 def test_weak_model_default_max_steps():

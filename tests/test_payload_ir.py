@@ -87,6 +87,69 @@ def test_find_prefers_payload_not_engine(tmp_path):
     assert "OriginTrial" not in top
 
 
+def test_find_accepts_asar_as_binary(tmp_path):
+    host = _host_tree(tmp_path, asar=True)
+    asar = host.parent / "resources" / "app.asar"
+    found = find_in_binary(str(asar), "trial")
+    assert found.get("ok") is not False
+    previews = [str(h.get("preview") or "") for h in (found.get("hits") or [])]
+    assert any("trial expired" in p for p in previews)
+    assert (found.get("hits") or [])[0].get("inner") == "app.js"
+
+
+def test_asar_find_skips_toc_and_node_modules(tmp_path):
+    from argus.payload import pack_asar, scan_payload_strings
+
+    blob = pack_asar(
+        {
+            "node_modules/foo/isPromise.js": b'{"ok":true}\nmodule.exports=function isPromise(){}',
+            "node_modules/foo/LICENSE": b"Licensed under the MIT license. See LICENSE file in the project root.",
+            "src/gate.js": (
+                b"function checkLicense(){\n"
+                b"  if (!isPro) { throw 'invalid license'; return false; }\n"
+                b"  return true;\n"
+                b"}\n"
+            ),
+        }
+    )
+    asar = tmp_path / "app.asar"
+    asar.write_bytes(blob)
+    hits = scan_payload_strings(asar, "isPro", limit=8)
+    assert hits
+    assert hits[0].get("inner") == "src/gate.js"
+    assert "isPromise" not in str(hits[0].get("preview") or "")
+    licensed = scan_payload_strings(asar, "license", limit=8)
+    assert licensed
+    assert "node_modules" not in str(licensed[0].get("inner") or "")
+    found = find_in_binary(str(asar), "isPro")
+    assert (found.get("hits") or [])[0].get("inner") == "src/gate.js"
+
+
+def test_zip_find_python_not_site_packages(tmp_path):
+    import zipfile
+
+    zpath = tmp_path / "app.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr(
+            "site-packages/pkg/license.py",
+            "Licensed under the MIT license. See LICENSE file in the project root.\n",
+        )
+        zf.writestr(
+            "app.py",
+            "def check():\n    if not ok:\n        raise SystemExit('trial expired')\n        return False\n",
+        )
+    from argus.payload import scan_payload_strings
+
+    hits = scan_payload_strings(zpath, "trial", limit=8)
+    assert hits
+    assert hits[0].get("inner") == "app.py"
+    found = find_in_binary(str(zpath), "trial")
+    assert (found.get("hits") or [])[0].get("inner") == "app.py"
+    diag = diagnose_target(str(zpath), error_text="trial expired")
+    assert diag.get("corrective_patch")
+    assert all(s.get("inner") == "app.py" for s in diag["corrective_patch"])
+
+
 def test_diagnose_payload_plan_and_host_zero_gates(tmp_path):
     host = _host_tree(tmp_path)
     reset_session()
@@ -199,3 +262,88 @@ def test_argus_discover_returns_brief(tmp_path):
     )
     assert out.get("ok") is True
     assert (out.get("brief") or {}).get("execution") == "host_runtime"
+
+
+def test_minified_js_diagnose_returns_window_not_if_parser(tmp_path):
+    src = b're.getIsX=B=>"ok"===B.app.st;re.next=1;\n'
+    asar = tmp_path / "app.asar"
+    asar.write_bytes(pack_asar({"src/main.js": src}))
+    diag = diagnose_target(str(asar), error_text='getIsX=B=>"ok"===')
+    assert diag.get("window")
+    assert "getIsX" in (diag.get("match") or "")
+    assert (diag.get("window") or "").find("getIsX") < 80
+    assert diag.get("inner") == "src/main.js"
+    assert not diag.get("corrective_patch")
+    assert "does not parse" in (diag.get("explanation") or "")
+
+
+def test_replace_string_from_window_strict_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARGUS_PATCH_MODE", "in_place")
+    src = b're.getIsX=B=>"ok"===B.app.st;re.next=1;\n'
+    asar = tmp_path / "app.asar"
+    asar.write_bytes(pack_asar({"src/main.js": src}))
+    from argus.llm.session import note_text_site
+    from argus.payload import read_payload_bytes
+
+    reset_session()
+    diag = diagnose_target(str(asar), error_text='getIsX=B=>"ok"===')
+    note_text_site(diag)
+    old = '"ok"===B.app.st'
+    new = "true" + " " * (len(old) - 4)
+    assert old in (diag.get("window") or "")
+    assert len(new) == len(old)
+    d = apply_plan(str(asar), steps=[{"kind": "replace_string", "old": old, "new": new}])
+    assert d.get("ok") is True, d
+    assert b"true" in read_payload_bytes(asar, inner="src/main.js")
+
+    asar.write_bytes(pack_asar({"src/main.js": src}))
+    reset_session()
+    note_text_site(diag)
+    longer = old + "/*x*/"
+    grew = apply_plan(
+        str(asar),
+        steps=[{"kind": "replace_string", "old": old, "new": longer}],
+    )
+    assert grew.get("ok") is True, grew
+    assert b"/*x*/" in read_payload_bytes(asar, inner="src/main.js")
+
+    asar.write_bytes(pack_asar({"src/main.js": src}))
+    reset_session()
+    note_text_site(diag)
+    bad = apply_plan(
+        str(asar),
+        steps=[{"kind": "replace_string", "old": "not-in-the-window-zzzz", "new": "x"}],
+    )
+    assert bad.get("ok") is False
+
+
+def test_find_and_diagnose_keep_inner_and_window(tmp_path):
+    from argus.llm.tools import dispatch_tool
+
+    src = b're.getIsX=B=>"ok"===B.app.st;re.next=1;\n'
+    asar = tmp_path / "app.asar"
+    asar.write_bytes(pack_asar({"src/main.js": src}))
+    reset_session()
+    found = json.loads(
+        dispatch_tool("argus_find", {"binary": str(asar), "query": "getIsX", "for_task": 1})
+    )
+    hits = found.get("hits") or (found.get("evidence") or {}).get("hits") or []
+    assert hits
+    assert hits[0].get("inner") == "src/main.js"
+    diag = json.loads(
+        dispatch_tool(
+            "argus_diagnose",
+            {"binary": str(asar), "error_text": 'getIsX=B=>"ok"===', "for_task": 1},
+        )
+    )
+    window = diag.get("window") or (diag.get("evidence") or {}).get("window") or ""
+    assert "getIsX" in window
+    assert diag.get("ok") is True
+    peek = json.loads(
+        dispatch_tool(
+            "argus_peek",
+            {"binary": str(asar), "addr": diag.get("string_addr") or hits[0]["addr"], "for_task": 1},
+        )
+    )
+    assert peek.get("ok") is True
+    assert "getIsX" in str(peek.get("window") or "")

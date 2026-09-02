@@ -13,10 +13,10 @@ SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 
 
 def test_tools_schema_nonempty():
-    assert len(ARGUS_TOOLS) >= 5
+    assert 5 <= len(ARGUS_TOOLS) <= 10
     names = {t["function"]["name"] for t in ARGUS_TOOLS}
-    assert "argus_ai" in names and "argus_solve" in names
-    assert "argus_atlas" in names
+    assert "argus_find" in names and "argus_look" in names
+    assert "argus_solve" not in names
 
 
 def test_dispatch_argus_ai_password():
@@ -41,7 +41,7 @@ def test_dispatch_detect_and_analyze():
 def test_gemini_tool_conversion():
     g = openai_tools_to_gemini(ARGUS_TOOLS)
     assert g and "functionDeclarations" in g[0]
-    assert any(d["name"] == "argus_solve" for d in g[0]["functionDeclarations"])
+    assert any(d["name"] == "argus_find" for d in g[0]["functionDeclarations"])
 
 
 def test_resolve_provider(monkeypatch):

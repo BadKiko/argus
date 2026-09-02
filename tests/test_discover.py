@@ -102,8 +102,9 @@ def test_argus_discover_tool(tmp_path):
 
 def test_argus_discover_in_tool_list():
     names = [t["function"]["name"] for t in ARGUS_TOOLS]
-    assert "argus_discover" in names
-    assert "argus_slice" in names
+    assert "argus_look" in names
+    assert "argus_diagnose" in names
+    assert "argus_apply" in names
 
 
 def test_agent_pre_discover_from_tmp_fixture(tmp_path, monkeypatch):

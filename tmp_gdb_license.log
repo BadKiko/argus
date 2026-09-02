@@ -1,0 +1,96 @@
+Starting BC under debugger...
+
+Program stopped.
+0x00007ffff7fe4540 in _start () from /lib64/ld-linux-x86-64.so.2
+exe_rx_base = 0x555556203000
+bp d78fb0_register runtime=0x5555562ccfb0
+bp d76b10_decode runtime=0x5555562cab10
+bp d76d35_charset_raise runtime=0x5555562cad35
+bp d79313_err39 runtime=0x5555562cd313
+bp d79390_err40 runtime=0x5555562cd390
+bp d794d0_err6 runtime=0x5555562cd4d0
+bp d81100_checksum runtime=0x5555562d5100
+bp d7dcb0_err_dialog runtime=0x5555562d1cb0
+bp d7aa80_commit runtime=0x5555562cea80
+
+>>> Ready. Help -> Enter Key -> любой текст -> OK
+
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff23ff6c0 (LWP 2589101)]
+[New Thread 0x7ffff1bfe6c0 (LWP 2589102)]
+[New Thread 0x7fffebfff6c0 (LWP 2589104)]
+[New Thread 0x7fffeb7fe6c0 (LWP 2589105)]
+[New Thread 0x7fffeaffd6c0 (LWP 2589106)]
+[New Thread 0x7fffea74d6c0 (LWP 2589109)]
+
+=== HIT d78fb0_register @ 5555562ccfb0 ===
+rax=0 rdi=7ffff2918380 rsi=7fffffffd040 rcx=0
+#0  0x00005555562ccfb0 in ??? ()
+#1  0x00005555562cbc00 in ??? ()
+#2  0x00007fffffffcff8 in ??? ()
+#3  0x00007fffffffd150 in ??? ()
+#4  0x00007fff00000001 in ??? ()
+#5  0x00007ffff2918380 in ??? ()
+
+=== HIT d76b10_decode @ 5555562cab10 ===
+rax=0 rdi=7fffffffc900 rsi=7ffff298fc10 rcx=555558004340
+#0  0x00005555562cab10 in ??? ()
+#1  0x00005555562cb165 in ??? ()
+#2  0x0000000000000000 in ??? ()
+
+=== HIT d81100_checksum @ 5555562d5100 ===
+rax=0 rdi=7ffff2918380 rsi=7ffff293a5a0 rcx=555558004340
+#0  0x00005555562d5100 in ??? ()
+#1  0x00005555562cd40d in ??? ()
+#2  0x00007ffff2918380 in ??? ()
+#3  0x00007ffff7ffe2e0 in ??? ()
+#4  0x00007fffffffca90 in ??? ()
+#5  0x0000000000000000 in ??? ()
+
+=== HIT d81100_checksum @ 5555562d5100 ===
+rax=15 rdi=7ffff2918380 rsi=7ffff293a6c0 rcx=7ffff293a6c0
+#0  0x00005555562d5100 in ??? ()
+#1  0x00005555562cd4c6 in ??? ()
+#2  0x00007ffff2918380 in ??? ()
+#3  0x00007ffff7ffe2e0 in ??? ()
+#4  0x00007fffffffca90 in ??? ()
+#5  0x0000000000000000 in ??? ()
+[New Thread 0x7fffe9b6d6c0 (LWP 2589110)]
+[New Thread 0x7fffe8f176c0 (LWP 2589111)]
+[New Thread 0x7fffe8b166c0 (LWP 2589112)]
+[Thread 0x7fffe8b166c0 (LWP 2589112) exited]
+[New Thread 0x7fffc78896c0 (LWP 2589115)]
+[New Thread 0x7fffc70886c0 (LWP 2589116)]
+[New Thread 0x7fffc68876c0 (LWP 2589117)]
+[New Thread 0x7fffbffff6c0 (LWP 2589149)]
+[New Thread 0x7fffbf7fe6c0 (LWP 2589150)]
+[Thread 0x7fffbf7fe6c0 (LWP 2589150) exited]
+[Thread 0x7fffbffff6c0 (LWP 2589149) exited]
+[Thread 0x7fffc68876c0 (LWP 2589117) exited]
+[Thread 0x7fffc70886c0 (LWP 2589116) exited]
+[Thread 0x7fffc78896c0 (LWP 2589115) exited]
+[New Thread 0x7fffbffff6c0 (LWP 2589687)]
+[New Thread 0x7fffbf7fe6c0 (LWP 2589688)]
+[New Thread 0x7fffc68876c0 (LWP 2589689)]
+[New Thread 0x7fffc70886c0 (LWP 2589701)]
+[New Thread 0x7fffc78896c0 (LWP 2589711)]
+[New Thread 0x7fffbeffd6c0 (LWP 2589732)]
+[Thread 0x7fffbeffd6c0 (LWP 2589732) exited]
+[Thread 0x7fffc78896c0 (LWP 2589711) exited]
+[Thread 0x7fffc70886c0 (LWP 2589701) exited]
+[Thread 0x7fffc68876c0 (LWP 2589689) exited]
+[Thread 0x7fffbf7fe6c0 (LWP 2589688) exited]
+[Thread 0x7fffbffff6c0 (LWP 2589687) exited]
+[New Thread 0x7fffc68876c0 (LWP 2590242)]
+[New Thread 0x7fffbeffd6c0 (LWP 2590243)]
+[New Thread 0x7fffc70886c0 (LWP 2590244)]
+[New Thread 0x7fffbf7fe6c0 (LWP 2590245)]
+[New Thread 0x7fffc78896c0 (LWP 2590250)]
+[New Thread 0x7fffbffff6c0 (LWP 2590306)]
+[Thread 0x7fffbffff6c0 (LWP 2590306) exited]
+[Thread 0x7fffc78896c0 (LWP 2590250) exited]
+[Thread 0x7fffbf7fe6c0 (LWP 2590245) exited]
+[Thread 0x7fffc70886c0 (LWP 2590244) exited]
+[Thread 0x7fffbeffd6c0 (LWP 2590243) exited]
+[Thread 0x7fffc68876c0 (LWP 2590242) exited]

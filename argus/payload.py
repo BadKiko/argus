@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-"""Host vs payload classification, archive index, and text-IR gates.
+"""Host vs payload classification, archive index, text splice.
 
-Universal: magic and install layout only — no product names. Agent tools stay
-discover / find / atlas / diagnose_failure / apply_plan.
+Universal: magic and install layout only — no product names.
+Python locates bytes and applies replace_string; it does not parse JS/Python/Lua.
 """
 
 import io
@@ -36,6 +36,8 @@ _RETURN_BOOL_RX = re.compile(
     rb"return\s+(false|true|!0|!1)\s*;",
     re.IGNORECASE,
 )
+_PY_IF_NOT_RX = re.compile(rb"if\s+not\s+([\w.]+)")
+_PY_RETURN_FALSE_RX = re.compile(rb"return\s+(False|false)\b")
 _TERNARY_RX = re.compile(
     rb"([\w.$]+)\s*\?\s*([\w.'\"]+)\s*:\s*([\w.'\"]+)",
 )
@@ -269,6 +271,8 @@ def sibling_payloads(primary: Path | str, *, limit: int = 24) -> List[Path]:
             return
         if is_patch_artifact_name(fp.name):
             return
+        if ".unpacked" in fp.parts and fp.suffix.lower() not in _TEXT_SUFFIXES:
+            return
         if is_payload_file(fp):
             seen.add(key)
             out.append(fp.resolve())
@@ -320,13 +324,18 @@ def _string_sidecar_hops(primary: Path) -> List[Path]:
     return out[:12]
 
 
-def demote_observe_name(name: str) -> bool:
-    """True for legal/engine sidecars that drown payload ranking."""
+def demote_observe_name(name: str, path: str = "") -> bool:
+    """True for legal/engine/bundled-git sidecars that drown payload ranking."""
     n = name or ""
-    if _DEMOTE_NAME_RX.search(n):
+    blob = f"{path}/{n}".replace("\\", "/")
+    low = blob.lower()
+    if _DEMOTE_NAME_RX.search(n) or _DEMOTE_NAME_RX.search(blob):
         return True
-    low = n.lower()
     if low.endswith((".html", ".htm", ".md", ".txt")) and "license" in low:
+        return True
+    if ".asar.unpacked" in low and "/git/" in low:
+        return True
+    if "/git/libexec/" in low or "/git-core/git-" in low:
         return True
     return False
 
@@ -351,7 +360,7 @@ def observe_rank(row: Dict[str, Any]) -> int:
         w += min(80, size // (512 * 1024))
     elif kind == "text":
         w += min(20, size // (64 * 1024))
-    if demote_observe_name(name):
+    if demote_observe_name(name, str(row.get("path") or "")):
         w -= 300
     return w * 10_000 + min(max(score, 0), 999) * 10 + min(size // (1024 * 1024), 99)
 
@@ -376,14 +385,20 @@ def prefer_observe_linked(
         m
         for m in ranked
         if str(m.get("kind") or "") in ("archive", "text")
-        and not demote_observe_name(str(m.get("name") or Path(str(m.get("path") or "")).name))
+        and not demote_observe_name(
+            str(m.get("name") or Path(str(m.get("path") or "")).name),
+            str(m.get("path") or ""),
+        )
     ]
     arch_paths = {str(m.get("path") or "") for m in archives}
     rest = [
         m
         for m in ranked
         if str(m.get("path") or "") not in arch_paths
-        and not demote_observe_name(str(m.get("name") or Path(str(m.get("path") or "")).name))
+        and not demote_observe_name(
+            str(m.get("name") or Path(str(m.get("path") or "")).name),
+            str(m.get("path") or ""),
+        )
     ]
     scored = [m for m in rest if int(m.get("score") or 0) > 0]
     seen: set[str] = set()
@@ -538,31 +553,52 @@ def _asar_entries(data: bytes) -> List[Dict[str, Any]]:
 def _asar_tree(data: bytes) -> Tuple[int, Optional[Dict[str, Any]]]:
     if len(data) < 16:
         return 0, None
-    pickle_size = struct.unpack_from("<I", data, 0)[0]
-    json_size = struct.unpack_from("<I", data, 4)[0]
-    if 8 + json_size <= len(data) and pickle_size >= json_size + 4:
-        blob = data[8 : 8 + json_size]
-        header_end = 4 + pickle_size
-        header_end = (header_end + 3) & ~3
+
+    def _loads(blob: bytes) -> Optional[Dict[str, Any]]:
         try:
             tree = json.loads(blob.decode("utf-8"))
-            if isinstance(tree, dict) and "files" in tree:
-                return header_end, tree
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            pass
-    idx = data.find(b'{"files":')
+            return None
+        return tree if isinstance(tree, dict) and "files" in tree else None
+
+    first = struct.unpack_from("<I", data, 0)[0]
+    second = struct.unpack_from("<I", data, 4)[0]
+
+    # Electron: [uint32 4][uint32 headerPickleLen][pickle: size, strlen, json]
+    if first == 4 and 16 < second < 50_000_000 and 8 + second <= len(data):
+        hp = data[8 : 8 + second]
+        if len(hp) >= 8:
+            str_len = struct.unpack_from("<I", hp, 4)[0]
+            if 0 < str_len <= len(hp) - 8:
+                tree = _loads(hp[8 : 8 + str_len])
+                if tree is not None:
+                    return (8 + second + 3) & ~3, tree
+
+    # pack_asar / simple pickle: [pickle_size][json_size][json]
+    if 8 < second < 50_000_000 and 8 + second <= len(data) and first >= second:
+        tree = _loads(data[8 : 8 + second])
+        if tree is not None:
+            header_end = (4 + first + 3) & ~3
+            if header_end < 8 + second:
+                header_end = (8 + second + 3) & ~3
+            return header_end, tree
+
+    cap = min(len(data), 32 * 1024 * 1024)
+    idx = data.find(b'{"files":', 0, cap)
     if idx < 0:
         return 0, None
-    decoder = json.JSONDecoder()
+    window = data[idx : idx + min(24 * 1024 * 1024, len(data) - idx)]
     try:
-        tree, end = decoder.raw_decode(data[idx:].decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        text = window.decode("utf-8")
+    except UnicodeDecodeError:
+        text = window.decode("utf-8", errors="ignore")
+    try:
+        tree, end = json.JSONDecoder().raw_decode(text)
+    except (json.JSONDecodeError, ValueError):
         return 0, None
-    header_end = idx + end
-    header_end = (header_end + 3) & ~3
-    if isinstance(tree, dict):
-        return header_end, tree
-    return 0, None
+    if not isinstance(tree, dict) or "files" not in tree:
+        return 0, None
+    return (idx + end + 3) & ~3, tree
 
 
 def pack_asar(files: Dict[str, bytes]) -> bytes:
@@ -584,6 +620,71 @@ def pack_asar(files: Dict[str, bytes]) -> bytes:
     pad = (4 - (len(header) % 4)) % 4
     header += b"\x00" * pad
     return header + b"".join(blobs)
+
+
+def peek_payload(
+    path: Path | str,
+    addr: Any,
+    *,
+    inner: Optional[str] = None,
+    radius: int = 400,
+) -> Dict[str, Any]:
+    """Source window at a file/archive offset — language-agnostic."""
+    p = Path(path)
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        return {"ok": False, "summary": str(e)}
+    off = _parse_off(addr)
+    if off is None:
+        return {"ok": False, "summary": f"bad addr {addr!r}"}
+    magic = sniff_magic(p, head=data[:64])
+    blob = data
+    used_inner = inner or ""
+    local = off
+    if magic in ("asar", "zip"):
+        hit_blob = None
+        for name, chunk, base in _iter_archive_blobs(data, magic):
+            if inner and name != inner:
+                continue
+            if inner and name == inner:
+                if base <= off < base + len(chunk):
+                    local = off - base
+                elif 0 <= off < len(chunk):
+                    local = off
+                else:
+                    local = 0
+                hit_blob, used_inner = chunk, name
+                break
+            if magic == "asar" and base <= off < base + len(chunk):
+                hit_blob, used_inner, local = chunk, name, off - base
+                break
+            if magic == "zip" and 0 <= off < len(chunk):
+                hit_blob, used_inner, local = chunk, name, off
+                break
+        if hit_blob is None:
+            return {
+                "ok": False,
+                "summary": f"addr {hex(off)} not in an inner file of {p.name}",
+                "ir": "archive",
+            }
+        blob = hit_blob
+    lo = max(0, local - radius)
+    hi = min(len(blob), local + radius)
+    window = blob[lo:hi].decode("utf-8", errors="replace").replace("\x00", " ")
+    rec: Dict[str, Any] = {
+        "ok": True,
+        "summary": f"peek {p.name}" + (f" inner={used_inner}" if used_inner else "") + f" @ {hex(off)}",
+        "addr": hex(off),
+        "ir": "archive" if magic in ("asar", "zip") else "text",
+        "module": str(p.resolve()),
+        "window": window,
+        "window_start": hex(lo),
+    }
+    if used_inner:
+        rec["inner"] = used_inner
+        rec["nearby_fn"] = used_inner
+    return rec
 
 
 def read_payload_bytes(path: Path | str, *, inner: Optional[str] = None) -> bytes:
@@ -654,18 +755,36 @@ def diagnose_text_module(
     diagnosis["string_addr"] = hex(located["addr"])
     diagnosis["string_kind"] = "utf8"
     diagnosis["string_preview"] = located.get("preview")
+    diagnosis["match"] = str(located.get("preview") or "")
+    # Bias the window after the hit so the splice site is at the start, not 350 bytes of junk.
+    lo = max(0, int(located["addr"]) - 40)
+    hi = min(len(data), int(located["addr"]) + 500)
+    window = data[lo:hi].decode("utf-8", errors="replace").replace("\x00", " ")
+    diagnosis["window"] = window
+    diagnosis["window_start"] = hex(lo)
     plan = _text_gates_near(data, located["addr"], p, inner=inner)
     diagnosis["corrective_patch"] = plan
-    diagnosis["ok"] = bool(plan)
+    # Site found is success. Regex if/return is an optional hint, not a language parser.
+    diagnosis["ok"] = True
+    where = f"{p.name}" + (f" inner={inner}" if inner else "")
+    diagnosis["root_cause"] = f"payload site {error_text[:40]!r} in {where}"
     if plan:
-        diagnosis["root_cause"] = f"text predicate near {error_text[:40]!r} in {p.name}"
         diagnosis["explanation"] = (
-            f"Payload string @ {hex(located['addr'])} in {p.name}. "
-            "Apply corrective_patch (replace_string / force_branch on text IR)."
+            f"Payload string @ {hex(located['addr'])} in {where}. "
+            "Optional regex hints in corrective_patch, or argus_apply replace_string from window."
+        )
+        diagnosis["next_hint"] = (
+            "argus_apply (omit steps=) uses regex hints; or pass steps="
+            "[{kind:replace_string, inner, old, new}] from match/window (new may be longer)."
         )
     else:
         diagnosis["explanation"] = (
-            f"Found {error_text[:40]!r} in payload {p.name} but no nearby if/return"
+            f"Found site @ {hex(located['addr'])} in {where}. "
+            "Argus does not parse this language — copy match= into old=."
+        )
+        diagnosis["next_hint"] = (
+            "argus_apply(steps=[{kind:replace_string, inner, old, new}]) "
+            "old= match= (substring of window); new may be longer (archive rebuild). Then argus_run."
         )
     return diagnosis
 
@@ -743,6 +862,17 @@ def _text_gates_near(
         new = b"1" + (b" " * (len(cond) - 1)) + rest if len(cond) >= 1 else old
         if new != old and len(new) == len(old):
             add("force_branch", lo + m.start(), old, new, "force ternary true")
+    for m in _PY_RETURN_FALSE_RX.finditer(chunk):
+        old = m.group(0)
+        tok = m.group(1)
+        new = old.replace(tok, b"True" if tok[0:1] == b"F" else b"true", 1)
+        if len(new) == len(old):
+            add("ret_imm", lo + m.start(), old, new, "force return true near payload string")
+    for m in _PY_IF_NOT_RX.finditer(chunk):
+        old = m.group(0)
+        new = old.replace(b"not ", b"    ", 1)
+        if new != old and len(new) == len(old):
+            add("force_branch", lo + m.start(), old, new, "drop if-not near payload string")
     return plan[:6]
 
 
@@ -863,6 +993,170 @@ def _parse_off(raw: Any) -> Optional[int]:
         return None
 
 
+_ARCHIVE_INDEX_RX = re.compile(
+    r'":\s*\{\s*"size"\s*:|"integrity"\s*:\s*\{\s*"algorithm"',
+)
+_MIT_BOILERPLATE_RX = re.compile(
+    r"(?i)licensed under the mit|spdx-license-identifier|see license file in the project",
+)
+_SKIP_INNER_RX = re.compile(
+    r"(?i)(?:^|/)(?:node_modules|site-packages|dist-packages|__pycache__|\.dist-info)(?:/|$)|"
+    r"(?:^|/)(?:LICENSE|LICENSES|COPYING|NOTICE|CREDITS)(?:[. _/]|$)|"
+    r"\.LICENSE\.txt$|"
+    r"(?:^|/)git/libexec(?:/|$)|"
+    r"(?:^|/)git-core/"
+)
+# Same set as sidecar text IR — not JS-only.
+_SOURCE_INNER_SUFFIXES = tuple(_TEXT_SUFFIXES)
+
+
+def _skip_inner_path(inner: str) -> bool:
+    rel = (inner or "").replace("\\", "/").lstrip("/")
+    return bool(_SKIP_INNER_RX.search(rel))
+
+
+def _word_in(text: str, needle: str) -> bool:
+    n = (needle or "").strip()
+    if len(n) < 3:
+        return False
+    return re.search(r"(?i)(?<![A-Za-z0-9_])" + re.escape(n) + r"(?![A-Za-z0-9_])", text or "") is not None
+
+
+def _is_ident_byte(b: int) -> bool:
+    return 48 <= b <= 57 or 65 <= b <= 90 or 97 <= b <= 122 or b == 95
+
+
+def _ident_boundary_match(blob: bytes, idx: int, nlen: int) -> bool:
+    """Reject isPro⊂isProxy; keep trialLaunch (next char uppercase) and trial\"."""
+    if idx > 0 and _is_ident_byte(blob[idx - 1]):
+        return False
+    end = idx + nlen
+    if end < len(blob) and _is_ident_byte(blob[end]):
+        # camelCase: Trial / trialLaunch — next uppercase is a new word
+        if not (65 <= blob[end] <= 90):
+            return False
+    return True
+
+
+def _near_text_gate(window: bytes) -> bool:
+    return bool(
+        _IF_RX.search(window)
+        or _RETURN_BOOL_RX.search(window)
+        or _PY_IF_NOT_RX.search(window)
+        or _PY_RETURN_FALSE_RX.search(window)
+    )
+
+
+def _score_archive_hit(*, preview: str, inner: str, query: str, near_gate: bool) -> int:
+    score = len(query) * 10 + 20
+    if inner:
+        score += 60
+        low = inner.lower()
+        if any(low.endswith(s) for s in _SOURCE_INNER_SUFFIXES):
+            score += 40
+        if _word_in(Path(inner).name, query) or _word_in(inner.replace("/", " "), query):
+            score += 25
+        if _skip_inner_path(inner):
+            score -= 400
+    if _ARCHIVE_INDEX_RX.search(preview or ""):
+        score -= 280
+    if _MIT_BOILERPLATE_RX.search(preview or ""):
+        score -= 220
+    if looks_host_engine_string(preview or ""):
+        score -= 120
+    if near_gate:
+        score += 90
+    if _word_in(preview or "", query):
+        score += 30
+    return score
+
+
+def _iter_archive_blobs(data: bytes, magic: str):
+    """Yield (inner_path, blob, archive_offset)."""
+    if magic == "asar":
+        for ent in _asar_entries(data):
+            inner = str(ent.get("inner") or "")
+            off = int(ent.get("offset") or 0)
+            size = int(ent.get("size") or 0)
+            if size <= 0 or off < 0 or off + size > len(data):
+                continue
+            yield inner, data[off : off + size], off
+        return
+    if magic == "zip":
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            return
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            inner = info.filename
+            try:
+                blob = zf.read(inner)
+            except Exception:
+                continue
+            yield inner, blob, int(info.header_offset)
+
+
+def _scan_archive_strings(data: bytes, query: str, *, magic: str, module: str, limit: int) -> List[Dict[str, Any]]:
+    needle = query.encode("utf-8", errors="replace")
+    nlow = needle.lower()
+    if len(nlow) < 3:
+        return []
+    pool: List[Dict[str, Any]] = []
+    per_file_cap = 4
+    raw_cap = max(limit * 12, 96)
+    for inner, blob, base_off in _iter_archive_blobs(data, magic):
+        if _skip_inner_path(inner):
+            continue
+        if not any(inner.lower().endswith(s) for s in _SOURCE_INNER_SUFFIXES):
+            continue
+        if len(blob) > 12_000_000:
+            continue
+        low = blob.lower()
+        start = 0
+        taken = 0
+        while taken < per_file_cap and len(pool) < raw_cap:
+            idx = low.find(nlow, start)
+            if idx < 0:
+                break
+            if not _ident_boundary_match(blob, idx, len(nlow)):
+                start = idx + max(len(nlow), 1)
+                continue
+            end = idx
+            while end < len(blob) and 32 <= blob[end] < 127 and end - idx < 120:
+                end += 1
+            preview = blob[idx:end].decode("latin1", errors="replace")
+            if _ARCHIVE_INDEX_RX.search(preview):
+                start = idx + max(len(nlow), 1)
+                continue
+            win = blob[max(0, idx - 120) : min(len(blob), idx + 120)]
+            near = _near_text_gate(win)
+            score = _score_archive_hit(preview=preview, inner=inner, query=query, near_gate=near)
+            if score < 20:
+                start = idx + max(len(nlow), 1)
+                continue
+            pool.append(
+                {
+                    "addr": hex(base_off + idx),
+                    "kind": "string",
+                    "preview": preview[:120],
+                    "needle": query,
+                    "score": score,
+                    "module": module,
+                    "ir": "archive",
+                    "inner": inner,
+                    "nearby_fn": inner,
+                }
+            )
+            taken += 1
+            start = idx + max(len(nlow), 1)
+        if len(pool) >= raw_cap:
+            break
+    pool.sort(key=lambda h: -int(h.get("score") or 0))
+    return pool[:limit]
+
+
 def scan_payload_strings(path: Path | str, query: str, *, limit: int = 20) -> List[Dict[str, Any]]:
     p = Path(path)
     try:
@@ -872,13 +1166,15 @@ def scan_payload_strings(path: Path | str, query: str, *, limit: int = 20) -> Li
     q = (query or "").strip()
     if len(q) < 3:
         return []
+    magic = sniff_magic(p, head=data[:64])
+    if magic in ("asar", "zip"):
+        return _scan_archive_strings(data, q, magic=magic, module=str(p.resolve()), limit=limit)
     needle = q.encode("utf-8", errors="replace")
     hits: List[Dict[str, Any]] = []
     start = 0
     low = data.lower()
     nlow = needle.lower()
-    magic = sniff_magic(p, head=data[:64])
-    kind = "archive" if magic in ("asar", "zip") else "text"
+    kind = "text"
     while len(hits) < limit:
         idx = low.find(nlow, start)
         if idx < 0:
@@ -903,35 +1199,6 @@ def scan_payload_strings(path: Path | str, query: str, *, limit: int = 20) -> Li
             }
         )
         start = idx + max(len(needle), 1)
-    inners = list_archive_entries(p) if kind == "archive" else []
-    for ent in inners[:40]:
-        inner = str(ent.get("inner") or "")
-        if query.lower() not in inner.lower() and query.encode() not in data:
-            continue
-        off = int(ent.get("offset") or 0)
-        size = int(ent.get("size") or 0)
-        chunk = data[off : off + size]
-        loc = locate_in_bytes(chunk, q)
-        if not loc:
-            continue
-        abs_off = off + int(loc["addr"])
-        if any(h.get("addr") == hex(abs_off) for h in hits):
-            continue
-        hits.append(
-            {
-                "addr": hex(abs_off),
-                "kind": "string",
-                "preview": loc.get("preview"),
-                "needle": q,
-                "score": 90,
-                "module": str(p.resolve()),
-                "ir": "archive",
-                "inner": inner,
-                "nearby_fn": None,
-            }
-        )
-        if len(hits) >= limit:
-            break
     hits.sort(key=lambda h: -int(h.get("score") or 0))
     return hits[:limit]
 
@@ -955,7 +1222,7 @@ def gate_scan_payload(path: str, query: Optional[str], *, limit: int = 16) -> Di
         "patch_plan": plan[:5],
         "patch_site_previews": [],
         "next_hint": (
-            f"payload IR {p.name}: diagnose_failure(error_text=hit) then apply_plan; "
+            f"payload IR {p.name}: argus_diagnose(error_text=hit) then argus_apply; "
             "do not patch the host ELF"
         ),
         "hints": {},
@@ -991,13 +1258,13 @@ def host_apply_refused(primary: str, steps: Sequence[Dict[str, Any]]) -> Optiona
     return (
         "host_runtime: refuse native apply on the shell ELF/PE. "
         f"Search payload modules ({', '.join(str(n) for n in names) or 'sidecar archive/text'}) "
-        "with find/atlas then diagnose_failure."
+        "with argus_find then argus_diagnose."
     )
 
 
 def format_brief_text(brief: Dict[str, Any]) -> str:
     lines = [
-        "TARGET BRIEF (facts from disk — read this before find/slice/apply):",
+        "TARGET BRIEF (facts from disk — read this before find/diagnose/apply):",
         f"  primary: {brief.get('path')}",
         f"  size: {brief.get('size')} bytes",
         f"  magic: {brief.get('magic')} arch={brief.get('arch') or '-'}",
@@ -1006,6 +1273,17 @@ def format_brief_text(brief: Dict[str, Any]) -> str:
     ]
     if brief.get("next_hint"):
         lines.append(f"  next: {brief.get('next_hint')}")
+    comm = brief.get("commercial") or {}
+    if comm.get("tier") == "commercial":
+        prot = comm.get("protection") or brief.get("protection") or {}
+        lines.append(
+            f"  protection: {prot.get('kind')} conf={prot.get('confidence')} workflow={comm.get('workflow')}"
+        )
+        from argus.deobf.commercial import format_commercial_text
+
+        block = format_commercial_text(comm)
+        if block:
+            lines.append(block)
     inst = brief.get("install_dir")
     if inst:
         lines.append(f"  install: {inst}")
@@ -1079,6 +1357,18 @@ def build_target_brief(
         "deps": deps,
         "next_hint": next_hint,
     }
+    if cls.get("magic") in ("elf", "pe") and p.is_file():
+        try:
+            from argus.binary import load_binary
+            from argus.deobf.commercial import analyze_commercial
+
+            comm = analyze_commercial(load_binary(str(p)))
+            brief["protection"] = comm.protection.to_dict()
+            if comm.tier == "commercial":
+                brief["commercial"] = comm.to_dict()
+                brief["next_hint"] = comm.next_hint
+        except Exception:
+            pass
     return brief
 
 

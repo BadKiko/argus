@@ -114,7 +114,7 @@ ARCHETYPES: List[ProtectionArchetype] = [
         ],
         vulnerability="Linear mathematical transformation solvable by SMT/Z3 solvers.",
         recommended_strategy=(
-            "Use argus_solve(binary) or argus_ai for automatic symbolic recovery of the valid key. "
+            "Map the compare with argus_find / argus_peek, then argus_exec if you need a solver probe. "
             "Alternatively stub authenticate to return 1."
         ),
     ),

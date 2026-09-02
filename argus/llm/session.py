@@ -46,6 +46,7 @@ class SessionContext:
     logic_patch_counts: Dict[str, int] = field(default_factory=dict)
     target_brief: Dict[str, Any] = field(default_factory=dict)
     observe_plan: Dict[str, Any] = field(default_factory=dict)
+    last_text_site: Dict[str, Any] = field(default_factory=dict)
 
 
 def _default_apply_batch() -> int:
@@ -121,6 +122,12 @@ def resolve_apply_steps(
 
     if steps:
         explicit = list(steps)
+        if text_replace_grounded(explicit):
+            return (
+                enrich_text_replace_steps(explicit),
+                "explicit_text",
+                "replace_string from diagnose window",
+            )
         if (
             sess.last_slice_patch_plan
             and _apply_fix_steps_enabled()
@@ -147,7 +154,11 @@ def resolve_apply_steps(
     if verified:
         return verified[:batch], "session_verified", f"auto from verified plan ({min(batch, len(verified))} step(s))"
 
-    return None, "missing", "run argus_slice first or pass steps="
+    return None, "missing", (
+        "pass steps=[{kind:replace_string, inner, old, new}] from diagnose match/window"
+        if (sess.last_text_site or {}).get("window")
+        else "run argus_diagnose first or pass steps="
+    )
 
 
 _current: Optional[SessionContext] = None
@@ -182,6 +193,86 @@ def add_verified_plan_steps(steps: List[Dict[str, Any]], *, replace: bool = Fals
 
 def get_verified_plan_steps() -> List[Dict[str, Any]]:
     return list(get_session().verified_plans)
+
+
+def note_text_site(site: Optional[Dict[str, Any]]) -> None:
+    """Remember the last payload/text window so apply can ground replace_string."""
+    sess = get_session()
+    if not site or not (site.get("window") or site.get("match")):
+        return
+    sess.last_text_site = {
+        "module": str(site.get("module") or ""),
+        "inner": str(site.get("inner") or ""),
+        "addr": str(site.get("addr") or site.get("string_addr") or ""),
+        "window": str(site.get("window") or ""),
+        "match": str(site.get("match") or site.get("string_preview") or ""),
+    }
+
+
+def text_replace_reject_reason(
+    steps: Optional[List[Dict[str, Any]]],
+    site: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Why payload replace_string is not grounded — empty if it is."""
+    if not steps:
+        return "no steps"
+    site = dict(site or get_session().last_text_site or {})
+    window = str(site.get("window") or "")
+    match = str(site.get("match") or "")
+    hay = window or match
+    if len(hay) < 3:
+        return "no diagnose window — argus_diagnose(error_text=verbatim find hit) first"
+    site_inner = str(site.get("inner") or "")
+    for step in steps:
+        if not isinstance(step, dict):
+            return "step is not an object"
+        kind = str(step.get("kind") or "replace_string")
+        if kind != "replace_string":
+            return f"kind={kind} is not replace_string (native force_branch still needs a diagnose plan)"
+        old = str(step.get("old") or "")
+        new = str(step.get("new") or "")
+        if len(old) < 1:
+            return "old= empty — copy match= from diagnose"
+        if old not in hay:
+            return (
+                "old= is not a substring of diagnose window/match — "
+                f"copy match={match[:80]!r}"
+            )
+        if not new:
+            return "new= empty"
+        inner = str(step.get("inner") or "")
+        if site_inner and inner and inner != site_inner:
+            return f"inner={inner!r} != diagnose inner={site_inner!r}"
+    return ""
+
+
+def text_replace_grounded(
+    steps: Optional[List[Dict[str, Any]]],
+    site: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when every step is replace_string and old is in the diagnose window.
+
+    Payload archives may grow or shrink; Python rebuilds. No language parser.
+    """
+    return not text_replace_reject_reason(steps, site=site)
+
+
+def enrich_text_replace_steps(
+    steps: List[Dict[str, Any]],
+    site: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    site = dict(site or get_session().last_text_site or {})
+    out: List[Dict[str, Any]] = []
+    for step in steps:
+        rec = dict(step)
+        rec.setdefault("kind", "replace_string")
+        rec.setdefault("ir", "text")
+        if site.get("inner") and not rec.get("inner"):
+            rec["inner"] = site["inner"]
+        if site.get("addr") and not rec.get("addr"):
+            rec["addr"] = site["addr"]
+        out.append(rec)
+    return out
 
 
 def _norm_modules(modules: Optional[List[str]]) -> Tuple[str, ...]:

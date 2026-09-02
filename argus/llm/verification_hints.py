@@ -18,6 +18,24 @@ def _parse_addr(raw: Any) -> Optional[int]:
         return None
 
 
+def _is_apply_entry(entry: Dict[str, Any]) -> bool:
+    return (entry.get("tool") or "") in ("argus_apply_plan", "argus_apply")
+
+
+def _is_diagnose_entry(entry: Dict[str, Any]) -> bool:
+    return (entry.get("tool") or "") in ("argus_diagnose_failure", "argus_diagnose")
+
+
+def _is_gui_oracle_entry(entry: Dict[str, Any]) -> bool:
+    tool = entry.get("tool") or ""
+    if tool == "argus_gui_oracle":
+        return True
+    if tool == "argus_run":
+        args = entry.get("args") or {}
+        return bool(args.get("reject_texts") or args.get("main_window_hint"))
+    return False
+
+
 def task_requires_outcome_change(task_text: str) -> bool:
     """True when the task likely needs validation/check outcome changed, not just launch."""
     from argus.llm.intent import is_bypass_license_task, task_signals
@@ -69,7 +87,7 @@ def patch_addrs_from_trace(tool_trace: List[Dict[str, Any]]) -> Set[int]:
     for entry in tool_trace:
         tool = entry.get("tool") or ""
         payload = _parse_result(entry)
-        if tool == "argus_apply_plan":
+        if _is_apply_entry(entry):
             for row in payload.get("applied") or []:
                 if row.get("ok"):
                     a = _parse_addr(row.get("addr"))
@@ -85,7 +103,7 @@ def patch_addrs_from_trace(tool_trace: List[Dict[str, Any]]) -> Set[int]:
 def diagnose_plan_addrs(tool_trace: List[Dict[str, Any]]) -> Set[int]:
     plan_addrs: Set[int] = set()
     for entry in tool_trace:
-        if entry.get("tool") != "argus_diagnose_failure":
+        if not _is_diagnose_entry(entry):
             continue
         payload = _parse_result(entry)
         if payload.get("ok") is not True:
@@ -93,6 +111,8 @@ def diagnose_plan_addrs(tool_trace: List[Dict[str, Any]]) -> Set[int]:
         plan = (
             payload.get("corrective_patch")
             or (payload.get("evidence") or {}).get("corrective_patch")
+            or payload.get("patch_plan")
+            or (payload.get("evidence") or {}).get("patch_plan")
             or []
         )
         for step in plan:
@@ -106,7 +126,7 @@ def diagnose_sink_addrs(tool_trace: List[Dict[str, Any]]) -> Set[int]:
     """Addresses mentioned as error/dialog sinks in diagnose explanations."""
     sinks: Set[int] = set()
     for entry in tool_trace:
-        if entry.get("tool") != "argus_diagnose_failure":
+        if not _is_diagnose_entry(entry):
             continue
         payload = _parse_result(entry)
         blob = " ".join(
@@ -128,7 +148,7 @@ def diagnose_sink_addrs(tool_trace: List[Dict[str, Any]]) -> Set[int]:
 
 def had_gui_launch_oracle_ok(tool_trace: List[Dict[str, Any]]) -> bool:
     for entry in tool_trace:
-        if entry.get("tool") != "argus_gui_oracle":
+        if not _is_gui_oracle_entry(entry):
             continue
         payload = _parse_result(entry)
         verify = payload.get("verify") or {}
@@ -222,7 +242,7 @@ def _diagnose_needles(tool_trace: List[Dict[str, Any]]) -> List[str]:
     needles: List[str] = []
     seen: Set[str] = set()
     for entry in tool_trace:
-        if entry.get("tool") != "argus_diagnose_failure":
+        if not _is_diagnose_entry(entry):
             continue
         et = str((entry.get("args") or {}).get("error_text") or "").strip()
         if len(et) < 8:
@@ -238,7 +258,7 @@ def _diagnose_needles(tool_trace: List[Dict[str, Any]]) -> List[str]:
 def _apply_indices_with_bytes(tool_trace: List[Dict[str, Any]]) -> List[int]:
     idxs: List[int] = []
     for i, entry in enumerate(tool_trace):
-        if entry.get("tool") != "argus_apply_plan":
+        if not _is_apply_entry(entry):
             continue
         payload = _parse_result(entry)
         applied = payload.get("applied") or []
