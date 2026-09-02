@@ -42,7 +42,7 @@ def _behavior_max_bytes() -> int:
     return 128 * 1024 * 1024
 
 
-_APPLY_KINDS = frozenset({"force_branch", "ret_imm", "nop_call", "nop_bytes", "force_flag"})
+_APPLY_KINDS = frozenset({"force_branch", "ret_imm", "nop_call", "nop_bytes", "force_flag", "replace_string"})
 
 
 def _parse_addr(raw: Any) -> Optional[int]:
@@ -114,7 +114,9 @@ def _is_diagnose_plan(plan: List[Dict[str, Any]], path: str = "") -> bool:
     if verified and _steps_subset_of_plan(plan, verified, path):
         return True
     kinds = {str(s.get("kind")) for s in plan}
-    return bool(kinds & {"force_flag", "nop_call"})
+    if any(s.get("ir") in ("text", "archive") for s in plan):
+        return True
+    return bool(kinds & {"force_flag", "nop_call", "replace_string"})
 
 
 def verify_patch_bytes(
@@ -183,6 +185,29 @@ def verify_patch_bytes(
         if not pair:
             pair = (original, patched)
         src_path, dst_path = pair
+        if str(step.get("ir") or "") in ("text", "archive") or kind == "replace_string":
+            try:
+                blob1 = Path(dst_path).read_bytes()
+            except OSError as e:
+                row["detail"] = f"load failed: {e}"
+                all_ok = False
+                details.append(row)
+                continue
+            old = (step.get("old") or "").encode("utf-8", errors="replace")
+            new = (step.get("new") or "").encode("utf-8", errors="replace")
+            if new and old and len(new) < len(old):
+                new = new + b" " * (len(old) - len(new))
+            if new and new in blob1:
+                row["ok"] = True
+                row["before"] = (old[:8].hex() if old else "")
+                row["after"] = new[:8].hex()
+                row["detail"] = "text bytes applied"
+                details.append(row)
+                continue
+            row["detail"] = "text bytes not found"
+            all_ok = False
+            details.append(row)
+            continue
         try:
             img0 = load_binary(src_path)
             img1 = load_binary(dst_path)
@@ -627,6 +652,30 @@ def apply_plan(
         slice_plan = list(sess.last_slice_patch_plan) + slice_plan
     slice_plan = slice_plan + get_verified_plan_steps()
 
+    from argus.payload import host_apply_refused
+
+    if plan:
+        refuse = host_apply_refused(path, plan)
+        if refuse:
+            return {
+                "ok": False,
+                "summary": refuse,
+                "plan_source": "host_runtime_refuse",
+                "slice_plan_len": len(slice_plan),
+                "patch_plan": plan,
+                "patched_path": None,
+                "patched_paths": [],
+                "applied": [],
+                "verify": {
+                    "kind": "patch_bytes",
+                    "ok": False,
+                    "detail": "host_runtime refuse",
+                    "steps": [],
+                },
+                "next_hint": refuse,
+                "evidence": {"plan_source": "host_runtime_refuse", "error": "host_runtime_refuse"},
+            }
+
     if explicit_steps:
         if strict_plan_enabled() and not _steps_subset_of_plan(plan, slice_plan, path):
             plan_source = "rejected_model"
@@ -688,6 +737,29 @@ def apply_plan(
             "evidence": {"patch_plan": [], "slice": slice_info, "plan_source": plan_source},
         }
 
+    from argus.payload import host_apply_refused
+
+    refuse = host_apply_refused(path, plan)
+    if refuse:
+        return {
+            "ok": False,
+            "summary": refuse,
+            "plan_source": plan_source,
+            "slice_plan_len": len(slice_plan),
+            "patch_plan": plan,
+            "patched_path": None,
+            "patched_paths": [],
+            "applied": [],
+            "verify": {
+                "kind": "patch_bytes",
+                "ok": False,
+                "detail": "host_runtime refuse",
+                "steps": [],
+            },
+            "next_hint": refuse,
+            "evidence": {"plan_source": plan_source, "error": "host_runtime_refuse"},
+        }
+
     # Group steps by module
     for s in plan:
         s.setdefault("module", path)
@@ -737,6 +809,29 @@ def apply_plan(
             "module": mod,
             "ok": False,
         }
+        is_text = str(step.get("ir") or "") in ("text", "archive") or kind == "replace_string"
+        if is_text:
+            from argus.payload import apply_text_step
+
+            try:
+                blob = Path(dst).read_bytes()
+                off = addr if addr is not None else 0
+                row["before"] = blob[off : off + 8].hex() if off < len(blob) else ""
+            except OSError:
+                row["before"] = ""
+            ok_step, step_detail = apply_text_step(dst, step)
+            try:
+                blob = Path(dst).read_bytes()
+                off = addr if addr is not None else 0
+                row["after"] = blob[off : off + 8].hex() if off < len(blob) else ""
+            except OSError:
+                row["after"] = ""
+            row["ok"] = bool(ok_step)
+            row["detail"] = step_detail
+            applied.append(row)
+            if not ok_step:
+                break
+            continue
         if addr is None or kind not in _APPLY_KINDS:
             row["detail"] = "unsupported step"
             applied.append(row)
@@ -808,7 +903,11 @@ def apply_plan(
     behavior_verify: Optional[Dict[str, Any]] = None
     disasm_verify: Optional[Dict[str, Any]] = None
     primary_out = module_outs.get(path, out)
-    if bytes_verify.get("ok") and primary_out and Path(primary_out).is_file():
+    text_only = bool(plan) and all(
+        str(s.get("ir") or "") in ("text", "archive") or s.get("kind") == "replace_string"
+        for s in plan
+    )
+    if bytes_verify.get("ok") and primary_out and Path(primary_out).is_file() and not text_only:
         if plan_source == "diagnose":
             disasm_verify = verify_patch_disasm(primary_out, plan)
         else:
@@ -826,7 +925,7 @@ def apply_plan(
                 original=path,
                 require_positive_oracle=plan_source == "slice",
             )
-    require_behavior = bool(plan) and plan_source == "slice"
+    require_behavior = bool(plan) and plan_source == "slice" and not text_only
     verify = _composite_verify(
         bytes_verify,
         behavior_verify,

@@ -157,11 +157,22 @@ def test_patch_in_sandbox(
             if not scratch_path:
                 return {
                     "safe": False,
-                    "detail": f"Sandbox module not staged: {Path(mod).name}",
-                    "scratch_applied": False,
+                    "detail": f"No scratch copy for module {Path(mod).name}",
+                    "module": mod,
                 }
-            ok = _apply_step_direct(scratch_path, step)
-            if not ok:
+            if str(step.get("ir") or "") in ("text", "archive") or step.get("kind") == "replace_string":
+                from argus.payload import apply_text_step
+
+                ok_t, detail_t = apply_text_step(scratch_path, step)
+                if not ok_t:
+                    return {
+                        "safe": False,
+                        "detail": f"text sandbox apply failed: {detail_t}",
+                        "step": step,
+                        "module": mod,
+                    }
+                continue
+            if not _apply_step_direct(scratch_path, step):
                 return {
                     "safe": False,
                     "detail": _sandbox_failure_detail(step, primary=primary, module=mod),
@@ -169,6 +180,17 @@ def test_patch_in_sandbox(
                     "module": mod,
                     "step": {"kind": step.get("kind"), "addr": step.get("addr")},
                 }
+
+        text_only = bool(patch_steps) and all(
+            str(s.get("ir") or "") in ("text", "archive") or s.get("kind") == "replace_string"
+            for s in patch_steps
+        )
+        if text_only:
+            return {
+                "safe": True,
+                "detail": "text/archive payload splice ok (no native smoke)",
+                "scratch_applied": True,
+            }
 
         from argus.binary.launch_env import stage_native_executable
 
