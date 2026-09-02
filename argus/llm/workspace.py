@@ -278,13 +278,13 @@ def assert_not_install_write(path: Optional[str], original_binary: str) -> Optio
 
 
 def exec_workspace_dir(work_binary: str) -> Path:
-    """Writable directory for argus_exec scripts."""
-    from argus.patch.deploy import in_place_enabled, install_root_for
-
+    """Writable directory for argus_exec scripts (never the system install tree)."""
     work = Path(work_binary).resolve()
-    if in_place_enabled():
-        d = install_root_for(work) / ".argus-exec"
-    else:
-        d = work.parent / ".argus-exec"
+    cache_root = Path(
+        os.environ.get("ARGUS_WORK_DIR")
+        or (Path.home() / ".cache" / "argus" / "workspaces")
+    )
+    key = hashlib.sha256(str(work).encode()).hexdigest()[:16]
+    d = cache_root / f"exec-{key}" / ".argus-exec"
     d.mkdir(parents=True, exist_ok=True)
     return d
