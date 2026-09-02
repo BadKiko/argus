@@ -291,6 +291,15 @@ def _binary_looks_cli(binary: Optional[str]) -> bool:
         return False
 
 
+def _payload_ir_non_native(binary: Optional[str] = None) -> bool:
+    try:
+        from argus.payload import payload_ir_of
+
+        return payload_ir_of(binary) != "native"
+    except Exception:
+        return False
+
+
 def _apply_plan_credits_patch(
     payload: Dict[str, Any],
     tool_trace: List[Dict[str, Any]],
@@ -742,6 +751,27 @@ def _evaluate_tasks(
                 )
             )
             continue
+
+        if gate_task and had_gui_oracle_ok and _payload_ir_non_native(binary):
+            gui_outcome = False
+            for entry, payload in evs:
+                if _is_gui_oracle(entry):
+                    v = payload.get("verify") or {}
+                    if v.get("outcome_verified") is True:
+                        gui_outcome = True
+            if not gui_outcome:
+                out.append(
+                    _emit_task_status(
+                        t,
+                        "incomplete",
+                        "idle GUI launch is not proof for payload_ir — "
+                        "apply payload diagnose plan; window title is not licensed",
+                        evs,
+                        tool_trace,
+                        binary=binary,
+                    )
+                )
+                continue
 
         if gate_task and had_patch_ok:
             outcome_ok, outcome_detail = gate_outcome_verified(tool_trace, t.text)
