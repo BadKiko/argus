@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from argus.binary import load_binary
+from argus.payload import looks_host_engine_string
 
 # Universal keywords (query-driven; empty default to keep engine generic)
 DEFAULT_KEYWORDS: List[str] = []
@@ -333,6 +334,8 @@ def _score_hit(preview: str, needle: str, kind: str) -> int:
         score -= 100
     if _looks_format_template(preview):
         score -= 80
+    if looks_host_engine_string(preview):
+        score -= 120
     return score
 
 
@@ -1144,9 +1147,21 @@ def rank_gate_candidates(
 def _diagnose_next_hint(hits: List[Dict[str, Any]], query: Optional[str] = None) -> str:
     """Steer gate work to diagnose_failure from a verbatim hit — not freestyle patch."""
     strings = [h for h in hits if h.get("kind") == "string" and h.get("preview")]
-    top = next((h for h in strings if not _looks_format_template(str(h.get("preview") or ""))), None)
+    usable = [
+        h
+        for h in strings
+        if not _looks_format_template(str(h.get("preview") or ""))
+        and not looks_host_engine_string(str(h.get("preview") or ""))
+    ]
+    top = next((h for h in usable), None)
     if top is None and strings:
         preview = str(strings[0].get("preview") or "").strip().replace("\n", " ")[:80]
+        if looks_host_engine_string(preview):
+            return (
+                f"top hit {preview!r} looks like host/engine text, not product UI. "
+                "argus_find/atlas on payload modules from TARGET BRIEF, then "
+                "diagnose_failure(error_text=verbatim payload preview)."
+            )
         return (
             f"top hit {preview!r} looks like a format template, not a runtime banner. "
             "Exec once (or atlas) and pass a verbatim stdout/GUI line to "
@@ -1239,6 +1254,7 @@ def find_in_binary(
             "nearby_fn": _nearby_fn(img, addr),
             "needle": needle,
             "score": _score_hit(preview, needle, kind),
+            "module": path,
         }
         scored.append((hit["score"], hit))
 
@@ -1293,6 +1309,18 @@ def find_in_binary(
                 if text:
                     add(sec.addr + start, "string", text, q0.lower())
 
+    try:
+        from argus.payload import list_payload_modules, scan_payload_strings
+
+        for rec in list_payload_modules(path):
+            mod = rec.get("path")
+            if not mod:
+                continue
+            for h in scan_payload_strings(mod, query or q, limit=limit):
+                scored.append((int(h.get("score") or 0), h))
+    except Exception:
+        pass
+
     scored.sort(key=lambda x: -x[0])
     hits = [h for _, h in scored[:limit]]
 
@@ -1325,24 +1353,32 @@ def find_in_binary(
 
     # On stripped binaries or explicit query, merge universal gate_scan gates
     if with_xrefs and (stripped or query):
+        skip_host_gates = False
         try:
-            from argus.find_slice import gate_scan
+            from argus.payload import payload_ir_of
 
-            sliced = gate_scan(path, query, limit=12)
-            seen_g = {(g.get("kind"), g.get("addr")) for g in gate_candidates}
-            for g in sliced.get("gate_candidates") or []:
-                key = (g.get("kind"), g.get("addr"))
-                if key in seen_g:
-                    continue
-                seen_g.add(key)
-                gate_candidates.append(g)
-            gate_candidates.sort(
-                key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True))
-            )
-            gate_candidates = gate_candidates[:12]
-            patch_candidates = list(gate_candidates)
+            skip_host_gates = payload_ir_of(path) != "native"
         except Exception:
-            pass
+            skip_host_gates = False
+        if not skip_host_gates:
+            try:
+                from argus.find_slice import gate_scan
+
+                sliced = gate_scan(path, query, limit=12)
+                seen_g = {(g.get("kind"), g.get("addr")) for g in gate_candidates}
+                for g in sliced.get("gate_candidates") or []:
+                    key = (g.get("kind"), g.get("addr"))
+                    if key in seen_g:
+                        continue
+                    seen_g.add(key)
+                    gate_candidates.append(g)
+                gate_candidates.sort(
+                    key=lambda g: (-int(g.get("score") or 0), g.get("ui_label_only", True))
+                )
+                gate_candidates = gate_candidates[:12]
+                patch_candidates = list(gate_candidates)
+            except Exception:
+                pass
 
     uniq_p = patch_candidates[:12]
 

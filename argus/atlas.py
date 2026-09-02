@@ -23,6 +23,7 @@ from argus.discover import (
     signal_score,
 )
 from argus.find import _scan_section_ci, find_string_xrefs_multi, query_string_needles, rewind_encoded_string, decode_encoded_preview
+from argus.payload import looks_host_engine_string
 
 _JCC = {
     "je", "jne", "jz", "jnz", "ja", "jae", "jb", "jbe", "jg", "jge", "jl", "jle",
@@ -85,7 +86,9 @@ def _collect_modules(primary: str, query: str, *, max_modules: int) -> Tuple[Lis
     def _add(p: Path, via: str) -> None:
         if not p.is_file() or is_patch_artifact(p.name):
             return
-        if not is_binary_file(p):
+        from argus.payload import is_payload_file
+
+        if not is_binary_file(p) and not is_payload_file(p):
             return
         key = str(p.resolve())
         if key in seen:
@@ -120,6 +123,22 @@ def _collect_modules(primary: str, query: str, *, max_modules: int) -> Tuple[Lis
             _add(sib, via)
         if len(paths) >= max_modules + 1:
             break
+    try:
+        from argus.payload import sibling_payloads
+
+        for pay in sibling_payloads(base_path, limit=16):
+            via = "payload"
+            try:
+                blob = pay.read_bytes()[:4_000_000]
+            except OSError:
+                continue
+            if needles and any(n and n in blob for n in needles):
+                via = "payload_query"
+            _add(pay, via)
+            if len(paths) >= max_modules + 1:
+                break
+    except Exception:
+        pass
 
     paths = [prim] + [p for p in paths if p != prim]
     return paths[: max_modules + 1], hops
@@ -477,10 +496,39 @@ def _rank_string(preview: str, query: str, data_refs: int, *, match_off: int = 0
         score -= 20
     if preview.startswith("\t") or "\x0e" in preview or "TUiAction" in preview:
         score -= 15
+    if looks_host_engine_string(preview):
+        score -= 120
     return score
 
 
+def _catalog_payload_blob(path: str, query: str) -> Dict[str, Any]:
+    from argus.payload import scan_payload_strings, sniff_magic
+
+    hits = scan_payload_strings(path, query, limit=_STRINGS_PER_MOD)
+    magic = sniff_magic(path)
+    kind = "archive" if magic in ("asar", "zip") else "text"
+    for h in hits:
+        h["data_refs"] = 0
+        h["match_off"] = 0
+    return {
+        "path": path,
+        "name": Path(path).name,
+        "fmt": kind,
+        "kind": kind,
+        "arch": "",
+        "string_hits": hits,
+        "functions": [],
+        "jump_count": 0,
+        "ok": True,
+        "_img": None,
+    }
+
+
 def _catalog_module(path: str, query: str) -> Dict[str, Any]:
+    from argus.discover import is_binary_file
+
+    if not is_binary_file(Path(path)):
+        return _catalog_payload_blob(path, query)
     img = load_binary(path)
     q = (query or "").strip()
     hits: List[Dict[str, Any]] = []

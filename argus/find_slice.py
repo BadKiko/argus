@@ -811,6 +811,10 @@ def gate_scan(
     Universal license-check discovery for stripped or named binaries.
     Uses substring string recovery + one batched xref pass + patch_plan.
     """
+    from argus.payload import gate_scan_payload, sniff_magic
+
+    if sniff_magic(path) not in ("elf", "pe"):
+        return gate_scan_payload(path, query, limit=limit)
     img = load_binary(path)
     module_path = str(path)
     hits: List[Dict[str, Any]] = []
@@ -1118,6 +1122,7 @@ def gate_scan_modules(
     If plan still empty and auto_widen: search nearby binaries (siblings / install dir).
     """
     from argus.discover import discover_targets, linked_modules, signal_score, resolve_link_base, widen_modules, is_patch_artifact
+    from argus.payload import get_cached_brief, list_payload_modules, payload_ir_of
 
     paths: List[str] = [primary]
     install_root: Optional[str] = None
@@ -1148,6 +1153,26 @@ def gate_scan_modules(
                 lp_s = str(lp)
                 if lp_s not in paths and signal_score(lp) > 0 and not is_patch_artifact(lp.name):
                     paths.append(lp_s)
+
+    host_runtime = False
+    try:
+        brief = get_cached_brief(link_primary) or {}
+        host_runtime = brief.get("execution") == "host_runtime" or payload_ir_of(link_primary) != "native"
+    except Exception:
+        host_runtime = False
+    if host_runtime:
+        try:
+            for rec in list_payload_modules(link_primary):
+                p = rec.get("path")
+                if p and p not in paths and not is_patch_artifact(Path(p).name):
+                    paths.append(p)
+        except Exception:
+            pass
+        host_key = str(Path(link_primary).resolve())
+        payload_first = [p for p in paths if str(Path(p).resolve()) != host_key]
+        host_last = [p for p in paths if str(Path(p).resolve()) == host_key]
+        paths = payload_first + host_last
+        auto_widen = False
 
     paths = [p for p in paths if not is_patch_artifact(Path(p).name)]
     if not paths:
@@ -1250,6 +1275,15 @@ def gate_scan_modules(
                     s["module"] = g.get("module")
                     break
             s.setdefault("module", primary)
+
+    if host_runtime:
+        host_key = str(Path(link_primary).resolve())
+        patch_plan = [
+            s
+            for s in patch_plan
+            if s.get("ir") in ("text", "archive")
+            or str(Path(s.get("module") or primary).resolve()) != host_key
+        ]
 
     non_ui = [g for g in all_gates[:limit] if not g.get("ui_label_only")]
     mod_imgs: Dict[str, Any] = {}
