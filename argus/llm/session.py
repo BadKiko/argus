@@ -44,6 +44,8 @@ class SessionContext:
     gate_fast_path_done: bool = False
     user_task_text: str = ""
     logic_patch_counts: Dict[str, int] = field(default_factory=dict)
+    target_brief: Dict[str, Any] = field(default_factory=dict)
+    observe_plan: Dict[str, Any] = field(default_factory=dict)
 
 
 def _default_apply_batch() -> int:
