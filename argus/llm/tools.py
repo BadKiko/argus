@@ -1203,9 +1203,11 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                 "primary": d.get("primary"),
                 "candidates": d.get("candidates") or [],
                 "linked": d.get("linked") or [],
+                "brief": d.get("brief"),
                 "evidence": {
                     "primary": d.get("primary"),
                     "linked": d.get("linked") or [],
+                    "brief": d.get("brief"),
                 },
                 "verify": {"kind": "none", "ok": None},
             },
@@ -1580,12 +1582,10 @@ def _dispatch_tool_inner(name: str, arguments: Dict[str, Any]) -> str:
                         "Do not diagnose the new banner; do not start research."
                     ),
                 )
-        from argus.binary import load_binary
-        from argus.flow import diagnose_failure
+        from argus.flow import diagnose_target
 
-        img = load_binary(arguments["binary"])
-        diag = diagnose_failure(
-            img,
+        diag = diagnose_target(
+            arguments["binary"],
             error_text=arguments.get("error_text"),
             crash_code=arguments.get("crash_code"),
             last_patch_addr=arguments.get("last_patch_addr"),

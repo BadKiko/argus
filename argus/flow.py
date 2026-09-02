@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
@@ -971,10 +972,108 @@ def diagnose_failure(
                 return diagnosis
 
             if use_atlas:
-                atlas_diag = _diagnose_via_atlas(img, error_text, found_va)
-                if atlas_diag.get("corrective_patch"):
-                    return atlas_diag
+                from argus.payload import get_cached_brief, payload_ir_of
+
+                hostish = False
+                try:
+                    hostish = payload_ir_of(getattr(img, "path", None)) != "native"
+                    brief = get_cached_brief(getattr(img, "path", None)) or {}
+                    hostish = hostish or brief.get("execution") == "host_runtime"
+                except Exception:
+                    hostish = False
+                if not hostish:
+                    atlas_diag = _diagnose_via_atlas(img, error_text, found_va)
+                    if atlas_diag.get("corrective_patch"):
+                        return atlas_diag
 
     diagnosis["ok"] = False
     diagnosis["explanation"] = f"Could not find exact string or crash root cause for '{error_text or crash_code}'"
+    try:
+        from argus.payload import get_cached_brief, payload_ir_of
+
+        path = getattr(img, "path", None)
+        brief = get_cached_brief(path) or {}
+        if brief.get("execution") == "host_runtime" or payload_ir_of(path) != "native":
+            names = [x.get("name") for x in (brief.get("payloads") or [])[:6]]
+            diagnosis["next_hint"] = (
+                "0 native gates on host_runtime — argus_find/atlas on payload modules "
+                f"({', '.join(str(n) for n in names) or 'sidecar'}), not the shell ELF"
+            )
+            diagnosis["corrective_patch"] = []
+    except Exception:
+        pass
     return diagnosis
+
+
+def diagnose_target(
+    path: str,
+    *,
+    error_text: Optional[str] = None,
+    crash_code: Optional[Union[int, str]] = None,
+    last_patch_addr: Optional[Union[int, str]] = None,
+    use_atlas: bool = True,
+) -> Dict[str, Any]:
+    """Diagnose native CFG or payload text/archive — same tool, decoder by module kind."""
+    from argus.payload import (
+        build_target_brief,
+        diagnose_text_module,
+        get_cached_brief,
+        list_payload_modules,
+        locate_in_bytes,
+        read_payload_bytes,
+        sniff_magic,
+        store_brief,
+    )
+
+    brief = get_cached_brief(path) or build_target_brief(path)
+    store_brief(brief)
+    q = (error_text or "").strip()
+    if q:
+        payloads = list(brief.get("payloads") or []) or list_payload_modules(path)
+        for rec in payloads:
+            mod = rec.get("path")
+            if not mod or not Path(mod).is_file():
+                continue
+            try:
+                data = read_payload_bytes(mod)
+            except OSError:
+                continue
+            loc = locate_in_bytes(data, q)
+            if not loc:
+                continue
+            inner = None
+            if rec.get("kind") == "archive" or sniff_magic(mod) in ("asar", "zip"):
+                from argus.payload import list_archive_entries
+
+                for ent in list_archive_entries(mod):
+                    off = int(ent.get("offset") or 0)
+                    size = int(ent.get("size") or 0)
+                    if off <= loc["addr"] < off + max(size, 1):
+                        inner = ent.get("inner")
+                        break
+            return diagnose_text_module(mod, q, inner=inner)
+        magic = sniff_magic(path)
+        if magic not in ("elf", "pe"):
+            return diagnose_text_module(path, q)
+
+    native_path = path
+    try:
+        from argus.binary import load_binary
+
+        img = load_binary(native_path)
+    except (ValueError, OSError, Exception) as exc:
+        return {
+            "ok": False,
+            "symptom": error_text or f"Crash {crash_code}",
+            "root_cause": "",
+            "explanation": f"not a native image: {exc}",
+            "corrective_patch": [],
+            "next_hint": brief.get("next_hint") or "search payload modules",
+        }
+    return diagnose_failure(
+        img,
+        error_text=error_text,
+        crash_code=crash_code,
+        last_patch_addr=last_patch_addr,
+        use_atlas=use_atlas,
+    )
