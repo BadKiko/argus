@@ -317,10 +317,16 @@ def merge_install_discover(
         p = m.get("path")
         if p:
             by_link[p] = m
-    out["linked"] = sorted(
-        by_link.values(),
-        key=lambda x: (-int(x.get("score") or 0), str(x.get("name") or "").lower()),
-    )[:12]
+    merged_linked = list(by_link.values())
+    try:
+        from argus.payload import prefer_observe_linked
+
+        out["linked"] = prefer_observe_linked(merged_linked, cap=12)
+    except Exception:
+        out["linked"] = sorted(
+            merged_linked,
+            key=lambda x: (-int(x.get("score") or 0), str(x.get("name") or "").lower()),
+        )[:12]
     scored = [c for c in out["candidates"] if int(c.get("score") or 0) > 0]
     if scored:
         out["install_modules_hint"] = [c["path"] for c in scored[:8]]
@@ -598,12 +604,61 @@ def discover_targets(
     if link_base and link_base.is_file():
         for mod in linked_modules(link_base, limit=max_linked * 2):
             sc = signal_score(mod)
-            linked.append({"path": str(mod), "score": sc, "name": Path(mod).name})
-        linked.sort(key=lambda x: (-int(x["score"]), x["name"]))
-        # Prefer modules that actually look license-related for unlock expansion
-        linked = [m for m in linked if int(m["score"]) > 0][:max_linked] or linked[:max_linked]
+            try:
+                sz = int(mod.stat().st_size)
+            except OSError:
+                sz = 0
+            rec = {
+                "path": str(mod),
+                "score": sc,
+                "name": Path(mod).name,
+                "kind": "native",
+                "size": sz,
+            }
+            linked.append(rec)
+        try:
+            from argus.payload import list_payload_modules
 
-    return {
+            for rec in list_payload_modules(link_base):
+                rec = dict(rec)
+                rec.setdefault("kind", rec.get("kind") or "text")
+                linked.append(rec)
+        except Exception:
+            pass
+        by_path: Dict[str, Dict[str, Any]] = {}
+        for m in linked:
+            pth = m.get("path")
+            if pth:
+                by_path[str(pth)] = m
+        linked = list(by_path.values())
+        try:
+            from argus.payload import prefer_observe_linked
+
+            linked = prefer_observe_linked(linked, cap=max_linked)
+        except Exception:
+            linked.sort(key=lambda x: (-int(x.get("score") or 0), str(x.get("name") or "").lower()))
+            linked = [m for m in linked if int(m.get("score") or 0) > 0][:max_linked] or linked[:max_linked]
+
+    next_hint = (
+        (
+            f"Use binary={primary} (main executable — patch ONLY work copy); "
+            f"gate logic may live in linked[] modules — argus_slice multi=true then apply_plan without steps="
+        )
+        if primary
+        else "No ELF/PE found — pass a path or run from a directory containing the binary"
+    )
+    brief = None
+    if primary:
+        try:
+            from argus.payload import build_target_brief
+
+            brief = build_target_brief(primary, install_dir=root)
+            if brief.get("payload_ir") and brief.get("payload_ir") != "native":
+                next_hint = str(brief.get("next_hint") or next_hint)
+        except Exception:
+            brief = None
+
+    out: Dict[str, Any] = {
         "ok": bool(primary),
         "summary": (
             f"discover primary={primary or 'none'} candidates={len(candidates)} "
@@ -612,12 +667,8 @@ def discover_targets(
         "primary": primary,
         "candidates": candidates[:20],
         "linked": linked,
-        "next_hint": (
-            (
-                f"Use binary={primary} (main executable — patch ONLY work copy); "
-                f"gate logic may live in linked[] modules — argus_slice multi=true then apply_plan without steps="
-            )
-            if primary
-            else "No ELF/PE found — pass a path or run from a directory containing the binary"
-        ),
+        "next_hint": next_hint,
     }
+    if brief:
+        out["brief"] = brief
+    return out
