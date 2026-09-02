@@ -14,6 +14,12 @@ SYSTEM = """You are Argus Agent — a senior reverse-engineering assistant backe
 
 You are the planner. Tools return facts about THIS binary. Ranked tools, hypotheses, archetypes, and prior-experience paths are optional ideas — never the architecture of the program. Form your own hypotheses from evidence.
 
+Target brief first:
+- After start you receive TARGET BRIEF (size, magic, execution, payload_ir, siblings, payload modules).
+- If CHECK FIRST is present: first argus_find/atlas MUST use those modules and queries (binary= the listed payload path). Do not start with argus_analyze on host _start, argus_research, or find on skip= files.
+- Read the brief before find/slice. If execution=host_runtime or payload_ir is text/archive: search those payload modules, not the host ELF/PE.
+- host_runtime + 0 native gates → do not argus_apply_plan on the shell. Idle gui_oracle (window title only) does not complete a non-native payload task.
+
 Static observe first (do not launch yet):
 - argus_find / argus_atlas with nouns from the USER TASK (the check they named), not the product filename.
 - On a string hit: immediately argus_diagnose_failure(error_text=<verbatim hit preview>). That preview is the needle — do not invent a license/password/AppState architecture.
@@ -199,7 +205,20 @@ def _build_user_content(
     discover: Optional[dict] = None,
     memory_hints: str = "",
 ) -> str:
-    parts = [user_prompt.strip()]
+    parts: List[str] = []
+    brief = (discover or {}).get("brief") if discover else None
+    if isinstance(brief, dict) and brief:
+        from argus.payload import format_brief_text
+
+        parts.append(format_brief_text(brief))
+        parts.append("")
+    plan = (discover or {}).get("observe_plan") if discover else None
+    if isinstance(plan, dict) and plan.get("check_first"):
+        from argus.llm.observe import format_observe_plan
+
+        parts.append(format_observe_plan(plan))
+        parts.append("")
+    parts.append(user_prompt.strip())
     if tasks_block:
         parts.append("")
         parts.append(tasks_block)
@@ -225,7 +244,9 @@ def _build_user_content(
         if linked:
             parts.append("Related modules (license may be here):")
             for m in linked[:8]:
-                parts.append(f"  - {m.get('path')} (score={m.get('score')})")
+                kind = m.get("kind")
+                extra = f" kind={kind}" if kind else ""
+                parts.append(f"  - {m.get('path')} (score={m.get('score')}{extra})")
         mod_hint = discover.get("install_modules_hint") or []
         if mod_hint:
             parts.append(
@@ -265,6 +286,11 @@ def _try_gate_fast_path(
     if not _fast_path_enabled():
         return None
     if os.environ.get("ARGUS_NO_FAST_PATH", "").strip().lower() in ("1", "true", "yes"):
+        return None
+    brief = (discover or {}).get("brief") or {}
+    if brief.get("execution") == "host_runtime" or (
+        brief.get("payload_ir") and brief.get("payload_ir") != "native"
+    ):
         return None
     try:
         from argus.llm.autopilot import run_gate_fast_path
@@ -535,6 +561,28 @@ def _run_agent_inner(
             transcript.note("discover_primary", primary=binary, summary=discover_info.get("summary"))
     elif binary and discover_info.get("linked") and verbose:
         print(f"[discover] linked={len(discover_info['linked'])}", flush=True)
+    try:
+        from argus.payload import build_target_brief, store_brief
+
+        brief_path = original_binary or binary
+        if brief_path:
+            brief = build_target_brief(brief_path, install_dir=install_root or None)
+            store_brief(brief)
+            discover_info = dict(discover_info or {})
+            discover_info["brief"] = brief
+            if brief.get("next_hint") and brief.get("payload_ir") != "native":
+                discover_info["next_hint"] = brief["next_hint"]
+            if transcript is not None:
+                transcript.note(
+                    "target_brief",
+                    execution=brief.get("execution"),
+                    payload_ir=brief.get("payload_ir"),
+                    magic=brief.get("magic"),
+                    size=brief.get("size"),
+                    payloads=len(brief.get("payloads") or []),
+                )
+    except Exception:
+        pass
     if not binary:
         msg = (
             "нет binary: укажите путь или запустите из каталога с ELF/PE "
@@ -560,6 +608,38 @@ def _run_agent_inner(
 
         maybe_warn_memory_usage()
         memory_hints = retrieve_hints(original_binary or binary, user_prompt, discover=discover_info)
+    except Exception:
+        pass
+    try:
+        from argus.llm.observe import build_observe_plan
+        from argus.llm.session import get_session
+
+        brief_for_plan = (discover_info or {}).get("brief") if discover_info else None
+        if isinstance(brief_for_plan, dict) and brief_for_plan:
+            observe_plan = build_observe_plan(
+                brief_for_plan,
+                user_prompt,
+                provider=prov,
+                url=url,
+                key=key,
+                model=model,
+            )
+            discover_info = dict(discover_info or {})
+            discover_info["observe_plan"] = observe_plan
+            get_session().observe_plan = dict(observe_plan)
+            if verbose:
+                names = [str(x.get("name") or "") for x in (observe_plan.get("check_first") or [])[:4]]
+                print(
+                    f"[observe] source={observe_plan.get('source')} first={', '.join(names)}",
+                    flush=True,
+                )
+            if transcript is not None:
+                transcript.note(
+                    "observe_plan",
+                    source=observe_plan.get("source"),
+                    check_first=[x.get("name") for x in (observe_plan.get("check_first") or [])[:6]],
+                    queries=(observe_plan.get("find_queries") or [])[:6],
+                )
     except Exception:
         pass
     if transcript is not None:
